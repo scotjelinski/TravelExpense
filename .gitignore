@@ -1,0 +1,9 @@
+# Secrets / local-only artifacts
+departmentcodes_function_key.json
+gl-lookup-func/local.settings.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+

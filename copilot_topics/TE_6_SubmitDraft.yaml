@@ -1,0 +1,229 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Submit the current draft by calling the submit-report endpoint.
+  Sends the email to itrenewal@core.coop and CCs the requester.
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  intent: {}
+
+  displayName: Main
+  actions:
+    - kind: BeginDialog
+      id: beginDialog_InitContext
+      displayName: Init Context
+      dialog: new_agent.topic.9InitContext
+      input: {}
+      output: {}
+
+    - kind: ConditionGroup
+      id: conditionGroup_DraftEmpty
+      displayName: Draft Empty
+      conditions:
+        - id: conditionItem_DraftEmpty
+          condition: =IsBlank(Global.DraftItemsJson) || Global.DraftItemsJson = "[]" || IsBlank(Global.DraftItemCount) || Global.DraftItemCount = 0
+          displayName: Draft Empty
+          actions:
+            - kind: SendActivity
+              id: sendActivity_DraftEmpty
+              displayName: Draft Empty
+              activity: Your draft is empty. Say "add receipt", "add per diem", or "add mileage" first.
+
+            - kind: EndDialog
+              id: endDialog_DraftEmpty
+              displayName: Draft Empty
+
+    - kind: SetVariable
+      id: setVariable_CcRequester
+      displayName: CC Requester
+      variable: Topic.CcRequester
+      value: =Len(Trim(Coalesce(Global.RequesterEmail, ""))) > 0
+
+    - kind: Question
+      id: question_ConfirmSubmit
+      displayName: Confirm Submit
+      interruptionPolicy:
+        allowInterruption: false
+
+      variable: Topic.ConfirmSubmit
+      prompt: Submit now (email itrenewal@core.coop)? We'll CC the requester email on file. (yes/no)
+      entity: BooleanPrebuiltEntity
+
+    - kind: ConditionGroup
+      id: conditionGroup_DoSubmit
+      displayName: Do Submit
+      conditions:
+        - id: conditionItem_DoSubmit
+          condition: =Topic.ConfirmSubmit = true
+          displayName: Do Submit
+          actions:
+            - kind: SetVariable
+              id: setVariable_DefaultReceiptInputs
+              displayName: Default Receipt Inputs
+              variable: Topic.AllowMissingReceipts
+              value: =true
+
+            - kind: SetVariable
+              id: setVariable_InitSubmitOk
+              displayName: Init Submit Ok
+              variable: Topic.SubmitOk
+              value: =false
+
+            - kind: SetVariable
+              id: setVariable_InitSubmitSent
+              displayName: Init Submit Sent
+              variable: Topic.SubmitSent
+              value: =false
+
+            - kind: SetVariable
+              id: setVariable_InitSubmitToEmail
+              displayName: Init Submit To Email
+              variable: Topic.SubmitToEmail
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_InitSubmitLineCount
+              displayName: Init Submit Line Count
+              variable: Topic.SubmitLineCount
+              value: =0
+
+            - kind: SetVariable
+              id: setVariable_InitSubmitAmountTotal
+              displayName: Init Submit Amount Total
+              variable: Topic.SubmitAmountTotal
+              value: =0
+
+            - kind: SetVariable
+              id: setVariable_InitSubmitCsvFilename
+              displayName: Init Submit CSV Filename
+              variable: Topic.SubmitCsvFilename
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_InitSubmitEmailError
+              displayName: Init Submit Email Error
+              variable: Topic.SubmitEmailError
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_InitSubmitTotalText
+              displayName: Init Submit Total Text
+              variable: Topic.SubmitTotalText
+              value: =""
+
+            - kind: BeginDialog
+              id: beginDialog_SubmitReport
+              dialog: new_agent.action.TravelExpense-SubmitReport
+              input:
+                binding:
+                  toEmail: "itrenewal@core.coop"
+                  requesterEmail: =Global.RequesterEmail
+                  ccRequester: =Topic.CcRequester
+                  receiptBundleFormat: "pdf"
+                  sendEmail: =true
+                  draftItemsJson: =Global.DraftItemsJson
+                  allowMissingReceipts: =Topic.AllowMissingReceipts
+              output:
+                binding:
+                  ok: Topic.SubmitOk
+                  sent: Topic.SubmitSent
+                  toEmail: Topic.SubmitToEmail
+                  lineCount: Topic.SubmitLineCount
+                  amountTotal: Topic.SubmitAmountTotal
+                  csvFilename: Topic.SubmitCsvFilename
+                  emailError: Topic.SubmitEmailError
+
+            - kind: SetVariable
+              id: setVariable_SubmitTotalTextAlways
+              displayName: Submit Total Text (Always)
+              variable: Topic.SubmitTotalText
+              value: =Concatenate("$", Text(Value(Topic.SubmitAmountTotal), "0.00"))
+
+            - kind: ConditionGroup
+              id: conditionGroup_SubmitResult
+              displayName: Submit Result
+              conditions:
+                - id: conditionItem_SubmitSent
+                  condition: =Topic.SubmitOk = true && Topic.SubmitSent = true
+                  displayName: Submit Sent
+                  actions:
+                    - kind: SendActivity
+                      id: sendActivity_SubmitSuccess
+                      displayName: Submit Success
+                      activity: "Sent to {Topic.SubmitToEmail}. Lines: {Topic.SubmitLineCount}. Total: {Topic.SubmitTotalText}"
+
+                    - kind: SetVariable
+                      id: setVariable_ClearDraftItemsJson
+                      displayName: Clear Draft Items JSON
+                      variable: Global.DraftItemsJson
+                      value: ="[]"
+
+                    - kind: SetVariable
+                      id: setVariable_ClearDraftItemCount
+                      displayName: Clear Draft Item Count
+                      variable: Global.DraftItemCount
+                      value: =0
+
+                    - kind: SetVariable
+                      id: setVariable_ClearReceiptItemCount
+                      displayName: Clear Receipt Item Count
+                      variable: Global.ReceiptItemCount
+                      value: =0
+
+                    - kind: SetVariable
+                      id: setVariable_ClearTotalsReceipt
+                      displayName: Clear Totals Receipt
+                      variable: Global.TotalReceiptAmount
+                      value: =0
+
+                    - kind: SetVariable
+                      id: setVariable_ClearTotalsPerDiem
+                      displayName: Clear Totals Per Diem
+                      variable: Global.TotalPerDiemAmount
+                      value: =0
+
+                    - kind: SetVariable
+                      id: setVariable_ClearTotalsMileage
+                      displayName: Clear Totals Mileage
+                      variable: Global.TotalMileageAmount
+                      value: =0
+
+                    - kind: SetVariable
+                      id: setVariable_ClearSummaryText
+                      displayName: Clear Summary Text
+                      variable: Global.DraftSummaryText
+                      value: =""
+
+                    - kind: EndDialog
+                      id: endDialog_SubmitSuccess
+                      displayName: Submit Success
+
+              elseActions:
+                - kind: SendActivity
+                  id: sendActivity_SubmitNotSent
+                  displayName: Submit Not Sent
+                  activity: |-
+                    Not sent.
+                    - ok: {Topic.SubmitOk}
+                    - sent: {Topic.SubmitSent}
+                    - to: {Topic.SubmitToEmail}
+                    - lines: {Topic.SubmitLineCount}
+                    - total: {Topic.SubmitTotalText}
+                    - error: {If(IsBlank(Topic.SubmitEmailError), "None returned. If you expected an email, verify the tool is passing sendEmail=true.", Topic.SubmitEmailError)}
+
+                - kind: EndDialog
+                  id: endDialog_SubmitNotSent
+                  displayName: Submit Not Sent
+
+      elseActions:
+        - kind: SendActivity
+          id: sendActivity_Cancelled
+          displayName: Cancelled
+          activity: Okay — not submitted.
+
+        - kind: EndDialog
+          id: endDialog_Cancelled
+          displayName: Cancelled
+
+inputType: {}
+outputType: {}

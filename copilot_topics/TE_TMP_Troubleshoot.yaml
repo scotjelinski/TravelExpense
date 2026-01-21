@@ -1,0 +1,387 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  DEPRECATED (DO NOT IMPORT).
+
+  This was a temporary troubleshooting topic used during development.
+  It is intentionally disabled and kept only because the file could not be deleted from this workspace.
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  displayName: Main
+  intent: {}
+  actions:
+    - kind: SendActivity
+      id: sendActivity_Deprecated
+      displayName: Deprecated
+      activity: This troubleshooting topic is deprecated and should not be imported or used.
+
+    - kind: EndDialog
+      id: endDialog_Deprecated
+      displayName: Deprecated
+
+    - kind: SetVariable
+      id: setVariable_TextNorm
+      displayName: Text Norm
+      variable: Topic.TextNorm
+      value: =Lower(Trim(Coalesce(System.Activity.Text, "")))
+
+    - kind: SetVariable
+      id: setVariable_AreaPrefill
+      displayName: Area Prefill
+      variable: Topic.Area
+      value: =If(Find("router", Topic.TextNorm) > 0, "router", If(Find("tool", Topic.TextNorm) > 0, "tools", If(Find("submit", Topic.TextNorm) > 0, "submit", If(Find("expense", Topic.TextNorm) > 0, "expensecodes", If(Find("health", Topic.TextNorm) > 0, "health", If(Find("org", Topic.TextNorm) > 0 || Find("dept", Topic.TextNorm) > 0, "orgchart", If(Find("per diem topic", Topic.TextNorm) > 0 || Find("perdiem topic", Topic.TextNorm) > 0, "perdiem-topic", If(Find("per", Topic.TextNorm) > 0 || Find("diem", Topic.TextNorm) > 0, "perdiem-tool", ""))))))))
+
+    - kind: ConditionGroup
+      id: conditionGroup_AskArea
+      displayName: Ask Area
+      conditions:
+        - id: conditionItem_AreaMissing
+          displayName: Area Missing
+          condition: =IsBlank(Topic.Area)
+          actions:
+            - kind: Question
+              id: question_Area
+              displayName: Area
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.Area
+              entity: StringPrebuiltEntity
+              prompt: "Troubleshoot what: health, orgchart, or perdiem?"
+
+    - kind: SendActivity
+      id: sendActivity_Context
+      displayName: Context
+      activity: |-
+        Troubleshoot (TEMP)
+        Area: {Topic.Area}
+        System.Activity.Text: {System.Activity.Text}
+        System.User.Email: {System.User.Email}
+        RouterVersion: {Global.RouterVersion}
+        PerDiemTopicVersion: {Global.PerDiemTopicVersion}
+        LastRoute: {Global.LastRoute}
+        LastRouterText: {Global.LastRouterText}
+        LastTopic: {Global.LastTopic}
+        RequesterEmail: {Global.RequesterEmail}
+        DepartmentCode: {Global.DepartmentCode}
+        DepartmentName: {Global.DepartmentName}
+
+    - kind: ConditionGroup
+      id: conditionGroup_Areas
+      displayName: Areas
+      conditions:
+        - id: conditionItem_Router
+          displayName: Router
+          condition: =Lower(Trim(Topic.Area)) = "router"
+          actions:
+            - kind: SendActivity
+              id: sendActivity_RouterState
+              displayName: Router State
+              activity: |-
+                Router state:
+                - RouterVersion: {Global.RouterVersion}
+                - LastRoute: {Global.LastRoute}
+                - LastRouterText: {Global.LastRouterText}
+                - LastTopic: {Global.LastTopic}
+
+        - id: conditionItem_Tools
+          displayName: Tools
+          condition: =Lower(Trim(Topic.Area)) = "tools"
+          actions:
+            - kind: BeginDialog
+              id: beginDialog_HealthCheck_Tools
+              displayName: HealthCheck
+              dialog: new_agent.action.TravelExpense-HealthCheck
+              input: {}
+              output:
+                binding:
+                  ok: Topic.HealthOk
+
+            - kind: SendActivity
+              id: sendActivity_ToolsSummary
+              displayName: Tools Summary
+              activity: |-
+                Tools summary:
+                - System.User.Email: {System.User.Email}
+                - Global.RequesterEmail: {Global.RequesterEmail}
+                - HealthCheck ok: {Topic.HealthOk}
+                - DepartmentCode: {Global.DepartmentCode}
+                - DepartmentName: {Global.DepartmentName}
+                - Tip: If OrgChart fails with "email is required", the tool input isn't being sent.
+
+        - id: conditionItem_Health
+          displayName: Health
+          condition: =Lower(Trim(Topic.Area)) = "health"
+          actions:
+            - kind: BeginDialog
+              id: beginDialog_HealthCheck
+              displayName: HealthCheck
+              dialog: new_agent.action.TravelExpense-HealthCheck
+              input: {}
+              output:
+                binding:
+                  ok: Topic.HealthOk
+
+            - kind: SendActivity
+              id: sendActivity_Health
+              displayName: Health
+              activity: "HealthCheck ok: {Topic.HealthOk}"
+
+        - id: conditionItem_OrgChart
+          displayName: OrgChart
+          condition: =Lower(Trim(Topic.Area)) = "orgchart"
+          actions:
+            - kind: Question
+              id: question_OrgUpn
+              displayName: Org UPN
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.OrgUpn
+              entity: StringPrebuiltEntity
+              prompt: "OrgChart lookup email/UPN (example: name@core.coop). Type \"me\" to use System.User.Email."
+
+            - kind: SetVariable
+              id: setVariable_OrgUpnNorm
+              displayName: Org UPN Norm
+              variable: Topic.OrgUpnNorm
+              value: =If(Lower(Trim(Coalesce(Topic.OrgUpn, ""))) = "me", Lower(Trim(Coalesce(System.User.Email, ""))), Lower(Trim(Coalesce(Topic.OrgUpn, ""))))
+
+            - kind: BeginDialog
+              id: beginDialog_OrgChartLookupByUpn
+              displayName: OrgChartLookupByUpn
+              dialog: new_agent.action.TravelExpense-OrgChartLookupByUpn
+              input:
+                binding:
+                  upn: =Topic.OrgUpnNorm
+              output:
+                binding:
+                  ok: Topic.OrgOk
+                  found: Topic.OrgFound
+                  email: Topic.OrgEmail
+                  displayName: Topic.OrgDisplayName
+                  jobTitle: Topic.OrgJobTitle
+                  departmentNameMapped: Topic.OrgDeptNameMapped
+                  departmentCode: Topic.OrgDeptCode
+                  error: Topic.OrgError
+
+            - kind: SendActivity
+              id: sendActivity_OrgChart
+              displayName: OrgChart
+              activity: |-
+                OrgChartLookupByUpn:
+                upn(sent): {Topic.OrgUpnNorm}
+                ok: {Topic.OrgOk}
+                found: {Topic.OrgFound}
+                email: {Topic.OrgEmail}
+                displayName: {Topic.OrgDisplayName}
+                jobTitle: {Topic.OrgJobTitle}
+                departmentCode: {Topic.OrgDeptCode}
+                departmentNameMapped: {Topic.OrgDeptNameMapped}
+                error: {Topic.OrgError}
+
+        - id: conditionItem_ExpenseCodes
+          displayName: ExpenseCodes
+          condition: =Lower(Trim(Topic.Area)) = "expensecodes"
+          actions:
+            - kind: Question
+              id: question_Dept
+              displayName: Department Code
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.Dept
+              entity: StringPrebuiltEntity
+              prompt: Department code (3 digits)?
+
+            - kind: Question
+              id: question_Activity
+              displayName: Activity Code
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.Activity
+              entity: StringPrebuiltEntity
+              prompt: "Activity code (example: 700)?"
+
+            - kind: BeginDialog
+              id: beginDialog_ExpenseCodesLookup
+              displayName: ExpenseCodesLookup
+              dialog: new_agent.action.TravelExpense-ExpenseCodesLookup
+              input:
+                binding:
+                  departmentCode: =Trim(Topic.Dept)
+                  activityCode: =Trim(Topic.Activity)
+              output:
+                binding:
+                  departmentCode: Topic.DeptEcho
+                  activityCode: Topic.ActivityEcho
+                  matches: Topic.Matches
+
+            - kind: SendActivity
+              id: sendActivity_ExpenseCodes
+              displayName: ExpenseCodes
+              activity: |-
+                ExpenseCodesLookup:
+                dept(sent): {Topic.Dept}
+                dept(echo): {Topic.DeptEcho}
+                activity(sent): {Topic.Activity}
+                activity(echo): {Topic.ActivityEcho}
+                matchCount: {CountRows(Topic.Matches)}
+
+        - id: conditionItem_PerDiemTopic
+          displayName: PerDiem Topic
+          condition: =Lower(Trim(Topic.Area)) = "perdiem-topic"
+          actions:
+            - kind: SendActivity
+              id: sendActivity_PerDiemTopicStart
+              displayName: PerDiem Topic Start
+              activity: Starting the Per Diem topic flow now.
+
+            - kind: BeginDialog
+              id: beginDialog_PerDiemTopic
+              displayName: Begin PerDiem Topic
+              dialog: new_agent.topic.TravelExpenseAddPerDiem
+
+            - kind: SendActivity
+              id: sendActivity_PerDiemTopicAfter
+              displayName: PerDiem Topic After
+              activity: |-
+                After PerDiem topic:
+                - LastTopic: {Global.LastTopic}
+                - PerDiemTopicVersion: {Global.PerDiemTopicVersion}
+                - DepartmentCode: {Global.DepartmentCode}
+                - DraftItemCount: {Global.DraftItemCount}
+
+        - id: conditionItem_PerDiemTool
+          displayName: PerDiem Tool
+          condition: =Lower(Trim(Topic.Area)) = "perdiem-tool"
+          actions:
+            - kind: SetVariable
+              id: setVariable_InitPerDiemOk2
+              displayName: Init PerDiemOk2
+              variable: Topic.PerDiemOk2
+              value: =false
+
+            - kind: SetVariable
+              id: setVariable_InitMieRate2
+              displayName: Init MieRate2
+              variable: Topic.MieRate2
+              value: =Blank()
+
+            - kind: SetVariable
+              id: setVariable_InitPerDiemError2
+              displayName: Init PerDiemError2
+              variable: Topic.PerDiemError2
+              value: =""
+
+            - kind: Question
+              id: question_Zip
+              displayName: Zip
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.ZipCode
+              entity: StringPrebuiltEntity
+              prompt: ZIP (5 digits)?
+
+            - kind: Question
+              id: question_Date
+              displayName: Date
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.TravelDateText
+              entity: StringPrebuiltEntity
+              prompt: Travel date (MM/DD/YYYY, Dec 12, or last Tuesday)?
+
+            - kind: Question
+              id: question_Days
+              displayName: Days
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.Days
+              entity: NumberPrebuiltEntity
+              prompt: Days?
+
+            - kind: SetVariable
+              id: setVariable_ZipCodeNorm
+              displayName: Zip Norm
+              variable: Topic.ZipCodeNorm
+              value: =Left(Trim(Topic.ZipCode), 5)
+
+            - kind: SetVariable
+              id: setVariable_TravelDateForLookup
+              displayName: Travel Date For Lookup
+              variable: Topic.TravelDateForLookup
+              value: =Trim(Topic.TravelDateText)
+
+            - kind: SetVariable
+              id: setVariable_InitPerDiemOk
+              displayName: Init PerDiemOk
+              variable: Topic.PerDiemOk
+              value: =false
+
+            - kind: SetVariable
+              id: setVariable_InitMieRate
+              displayName: Init MieRate
+              variable: Topic.MieRate
+              value: =Blank()
+
+            - kind: SetVariable
+              id: setVariable_InitPerDiemError
+              displayName: Init PerDiemError
+              variable: Topic.PerDiemError
+              value: =""
+
+            - kind: BeginDialog
+              id: beginDialog_PerDiemLookup
+              displayName: PerDiemLookup
+              dialog: new_agent.action.TravelExpense-PerDiemLookup
+              input:
+                binding:
+                  zipCode: =Topic.ZipCodeNorm
+                  travelDate: =Topic.TravelDateForLookup
+              output:
+                binding:
+                  ok: Topic.PerDiemOk
+                  mieRate: Topic.MieRate
+                  error: Topic.PerDiemError
+
+            - kind: SendActivity
+              id: sendActivity_PerDiem
+              displayName: PerDiem
+              activity: |-
+                PerDiemLookup:
+                ok: {Topic.PerDiemOk}
+                zip(raw): {Topic.ZipCode}
+                zip(norm): {Topic.ZipCodeNorm}
+                date(sent): {Topic.TravelDateForLookup}
+                mieRate: {Topic.MieRate}
+                error: {Topic.PerDiemError}
+                Note: If the function logs show params_keys=[] then the connector is not sending query params.
+
+            - kind: BeginDialog
+              id: beginDialog_PerDiemLookupLiteral
+              displayName: PerDiemLookup (Literal Test)
+              dialog: new_agent.action.TravelExpense-PerDiemLookup
+              input:
+                binding:
+                  zipCode: "80128"
+                  travelDate: "2025-12-12"
+              output:
+                binding:
+                  ok: Topic.PerDiemOk2
+                  mieRate: Topic.MieRate2
+                  error: Topic.PerDiemError2
+
+            - kind: SendActivity
+              id: sendActivity_PerDiemLiteral
+              displayName: PerDiem (Literal)
+              activity: |-
+                PerDiemLookup (Literal Test):
+                ok: {Topic.PerDiemOk2}
+                zip(sent): 80128
+                date(sent): 2025-12-12
+                mieRate: {Topic.MieRate2}
+                error: {Topic.PerDiemError2}
+
+    - kind: EndDialog
+      id: endDialog_Temp
+      displayName: Temp
+inputType: {}
+outputType: {}

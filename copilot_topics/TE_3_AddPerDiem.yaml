@@ -1,0 +1,836 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Add a per diem line item to the current travel-expense draft.
+  Looks up the daily rate via the per-diem lookup action (fallback to manual rate if lookup fails).
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  intent: {}
+  displayName: Main
+  actions:
+    - kind: BeginDialog
+      id: beginDialog_InitContext
+      displayName: Init Context
+      input: {}
+      dialog: new_agent.topic.9InitContext
+      output: {}
+
+    - kind: SetVariable
+      id: setVariable_LastTopic
+      displayName: Last Topic
+      variable: Global.LastTopic
+      value: ="perdiem"
+
+    - kind: SetVariable
+      id: setVariable_PerDiemVersion
+      displayName: PerDiem Version
+      variable: Global.PerDiemTopicVersion
+      value: ="2026-01-19"
+
+    - kind: ConditionGroup
+      id: conditionGroup_RequireDept
+      displayName: Require Dept
+      conditions:
+        - id: conditionItem_NoDept
+          condition: =Len(Trim(Coalesce(Global.DepartmentCode, ""))) = 0
+          displayName: No Dept
+          actions:
+            - kind: SetVariable
+              id: setVariable_DepartmentCodeInput_Init
+              displayName: Department Code Input Init
+              variable: Topic.DepartmentCodeInput
+              value: =""
+
+            - kind: Question
+              id: question_DepartmentCode
+              displayName: Department Code
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.DepartmentCodeInput
+              entity: StringPrebuiltEntity
+              prompt: "What's the 3-digit department code for this expense? (example: 620)"
+
+            - kind: SetVariable
+              id: setVariable_SetGlobalDepartmentCode
+              displayName: Set Global Department Code
+              variable: Global.DepartmentCode
+              value: =Coalesce(Match(Trim(Coalesce(Topic.DepartmentCodeInput, "")), "[0-9]{3}").FullMatch, "")
+
+            - kind: ConditionGroup
+              id: conditionGroup_ValidateDepartmentCode
+              displayName: Validate Department Code
+              conditions:
+                - id: conditionItem_DepartmentInvalid
+                  displayName: Department Invalid
+                  condition: =!IsMatch(Global.DepartmentCode, "^[0-9]{3}$")
+                  actions:
+                    - kind: SetVariable
+                      id: setVariable_DepartmentCodeInput_Clear
+                      displayName: Department Code Input Clear
+                      variable: Topic.DepartmentCodeInput
+                      value: =""
+
+                    - kind: Question
+                      id: question_DepartmentCodeRetry
+                      displayName: Department Code (Retry)
+                      interruptionPolicy:
+                        allowInterruption: false
+                      variable: Topic.DepartmentCodeInput
+                      entity: StringPrebuiltEntity
+                      prompt: "Department code must be 3 digits (example: 620). What's the department code?"
+
+                    - kind: SetVariable
+                      id: setVariable_SetGlobalDepartmentCodeRetry
+                      displayName: Set Global Department Code (Retry)
+                      variable: Global.DepartmentCode
+                      value: =Coalesce(Match(Trim(Coalesce(Topic.DepartmentCodeInput, "")), "[0-9]{3}").FullMatch, "")
+
+    - kind: SetVariable
+      id: setVariable_InitZipCode
+      displayName: Init Zip Code
+      variable: Topic.ZipCode
+      value: =""
+
+    - kind: SetVariable
+      id: setVariable_InitZipCodeInput
+      displayName: Init Zip Code Input
+      variable: Topic.ZipCodeInput
+      value: =""
+
+    - kind: SetVariable
+      id: setVariable_InitTravelDateText
+      displayName: Init Travel Date Text
+      variable: Topic.TravelDateText
+      value: =""
+
+    - kind: SetVariable
+      id: setVariable_InitDays
+      displayName: Init Days
+      variable: Topic.Days
+      value: =0
+
+    - kind: SetVariable
+      id: setVariable_InitTravelers
+      displayName: Init Travelers
+      variable: Topic.Travelers
+      value: =1
+
+    - kind: SetVariable
+      id: setVariable_RawTextLower
+      displayName: Raw Text Lower
+      variable: Topic.RawTextLower
+      value: =Lower(Trim(Coalesce(System.Activity.Text, "")))
+
+    - kind: SetVariable
+      id: setVariable_ZipCandidateFromText
+      displayName: Zip Candidate From Text
+      variable: Topic.ZipCandidateFromText
+      value: =Coalesce(Match(Topic.RawTextLower, "[0-9]{5}").FullMatch, "")
+
+    - kind: ConditionGroup
+      id: conditionGroup_PrefillZipFromText
+      displayName: Prefill Zip From Text
+      conditions:
+        - id: conditionItem_PrefillZipFromText
+          condition: =(IsBlank(Topic.ZipCode) || Len(Trim(Topic.ZipCode)) = 0) && !IsBlank(Topic.ZipCandidateFromText)
+          displayName: Prefill Zip From Text
+          actions:
+            - kind: SetVariable
+              id: setVariable_SetZipFromText
+              displayName: Set Zip From Text
+              variable: Topic.ZipCode
+              value: =Topic.ZipCandidateFromText
+
+    - kind: SetVariable
+      id: setVariable_DaysCandidateFromText
+      displayName: Days Candidate From Text
+      variable: Topic.DaysCandidateFromText
+      value: =Coalesce(Match(Topic.RawTextLower, "[0-9]+[ ]*days?").FullMatch, "")
+
+    - kind: ConditionGroup
+      id: conditionGroup_PrefillDaysFromText
+      displayName: Prefill Days From Text
+      conditions:
+        - id: conditionItem_PrefillDaysFromText
+          condition: =Topic.Days <= 0 && !IsBlank(Topic.DaysCandidateFromText)
+          displayName: Prefill Days From Text
+          actions:
+            - kind: SetVariable
+              id: setVariable_SetDaysFromText
+              displayName: Set Days From Text
+              variable: Topic.Days
+              value: =Value(Match(Lower(Topic.DaysCandidateFromText), "[0-9]+").FullMatch)
+
+    - kind: SetVariable
+      id: setVariable_TravelDateCandidateFromText
+      displayName: Travel Date Candidate From Text
+      variable: Topic.TravelDateCandidateFromText
+      value: |-
+        =Coalesce(
+          Match(Topic.RawTextLower, "[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}").FullMatch,
+          Match(Topic.RawTextLower, "[0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}").FullMatch,
+          Match(Topic.RawTextLower, "(today|yesterday|tomorrow)").FullMatch,
+          Match(Topic.RawTextLower, "last[ ]+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)").FullMatch,
+          Match(Topic.RawTextLower, "(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*[ ]+[0-9]{1,2}").FullMatch,
+          ""
+        )
+
+    - kind: ConditionGroup
+      id: conditionGroup_PrefillTravelDateFromText
+      displayName: Prefill Travel Date From Text
+      conditions:
+        - id: conditionItem_PrefillTravelDateFromText
+          condition: =(IsBlank(Topic.TravelDateText) || Len(Trim(Topic.TravelDateText)) = 0) && !IsBlank(Topic.TravelDateCandidateFromText)
+          displayName: Prefill Travel Date From Text
+          actions:
+            - kind: SetVariable
+              id: setVariable_SetTravelDateFromText
+              displayName: Set Travel Date From Text
+              variable: Topic.TravelDateText
+              value: =Topic.TravelDateCandidateFromText
+
+    - kind: ConditionGroup
+      id: conditionGroup_EnsureZipCode
+      displayName: Ensure Zip Code
+      conditions:
+        - id: conditionItem_ZipMissing
+          condition: =IsBlank(Topic.ZipCode) || Len(Trim(Topic.ZipCode)) = 0
+          displayName: Zip Missing
+          actions:
+            - kind: Question
+              id: question_ZipCode
+              displayName: Zip Code
+              interruptionPolicy:
+                allowInterruption: false
+
+              variable: Topic.ZipCodeInput
+              prompt: What is the 5-digit ZIP code for the travel location?
+              entity: StringPrebuiltEntity
+
+            - kind: SetVariable
+              id: setVariable_SetZipFromInput
+              displayName: Set Zip From Input
+              variable: Topic.ZipCode
+              value: =Topic.ZipCodeInput
+
+    - kind: ConditionGroup
+      id: conditionGroup_EnsureTravelDate
+      displayName: Ensure Travel Date
+      conditions:
+        - id: conditionItem_TravelDateMissing
+          condition: =IsBlank(Topic.TravelDateText) || Len(Trim(Topic.TravelDateText)) = 0
+          displayName: Travel Date Missing
+          actions:
+            - kind: Question
+              id: question_TravelDate
+              displayName: Travel Date
+              interruptionPolicy:
+                allowInterruption: false
+
+              variable: Topic.TravelDateText
+              prompt: What is the travel start date? (MM/DD/YYYY, Dec 12, or last Tuesday)
+              entity: StringPrebuiltEntity
+
+    - kind: SetVariable
+      id: setVariable_NormalizeTravelDateText
+      displayName: Normalize Travel Date Text
+      variable: Topic.TravelDateText
+      value: =Trim(Topic.TravelDateText)
+
+    - kind: ConditionGroup
+      id: conditionGroup_EnsureDays
+      displayName: Ensure Days
+      conditions:
+        - id: conditionItem_DaysMissing
+          condition: =Topic.Days <= 0
+          displayName: Days Missing
+          actions:
+            - kind: Question
+              id: question_Days
+              displayName: Days
+              interruptionPolicy:
+                allowInterruption: false
+
+              variable: Topic.Days
+              prompt: "How many days does this per diem cover? (example: 2)"
+              entity: NumberPrebuiltEntity
+
+    - kind: ConditionGroup
+      id: conditionGroup_ValidateDays
+      displayName: Validate Days
+      conditions:
+        - id: conditionItem_DaysInvalid
+          condition: =Topic.Days <= 0
+          displayName: Days Invalid
+          actions:
+            - kind: Question
+              id: question_DaysRetry
+              displayName: Days Retry
+              interruptionPolicy:
+                allowInterruption: false
+
+              variable: Topic.Days
+              prompt: "Days must be at least 1. How many days? (example: 2)"
+              entity: NumberPrebuiltEntity
+
+    - kind: SetVariable
+      id: setVariable_ZipCodeNorm
+      displayName: Zip Code Norm
+      variable: Topic.ZipCodeNorm
+      value: =Coalesce(Match(Trim(Coalesce(Topic.ZipCode, "")), "[0-9]{5}").FullMatch, "")
+
+    - kind: ConditionGroup
+      id: conditionGroup_ValidateZip
+      displayName: Validate Zip
+      conditions:
+        - id: conditionItem_ZipInvalid
+          condition: =!IsMatch(Topic.ZipCodeNorm, "^[0-9]{5}$")
+          displayName: Zip Invalid
+          actions:
+            - kind: SetVariable
+              id: setVariable_ClearZipBeforeRetry
+              displayName: Clear Zip Before Retry
+              variable: Topic.ZipCodeInput
+              value: =""
+
+            - kind: Question
+              id: question_ZipCodeRetry
+              displayName: Zip Code Retry
+              interruptionPolicy:
+                allowInterruption: false
+
+              variable: Topic.ZipCodeInput
+              prompt: ZIP code must be 5 digits. What's the 5-digit ZIP?
+              entity: StringPrebuiltEntity
+
+            - kind: SetVariable
+              id: setVariable_SetZipFromRetryInput
+              displayName: Set Zip From Retry Input
+              variable: Topic.ZipCode
+              value: =Topic.ZipCodeInput
+
+            - kind: SetVariable
+              id: setVariable_ZipCodeNormRetry
+              displayName: Zip Code Norm Retry
+              variable: Topic.ZipCodeNorm
+              value: =Coalesce(Match(Trim(Coalesce(Topic.ZipCode, "")), "[0-9]{5}").FullMatch, "")
+
+    - kind: ConditionGroup
+      id: conditionGroup_EnsureZipBeforeLookup
+      displayName: Ensure Zip Before Lookup
+      conditions:
+        - id: conditionItem_EnsureZipBeforeLookup
+          condition: =!IsMatch(Topic.ZipCodeNorm, "^[0-9]{5}$")
+          displayName: Ensure Zip Before Lookup
+          actions:
+            - kind: SetVariable
+              id: setVariable_ClearZipBeforeFinal
+              displayName: Clear Zip Before Final
+              variable: Topic.ZipCodeInput
+              value: =""
+
+            - kind: Question
+              id: question_ZipCodeFinal
+              displayName: Zip Code (Final)
+              interruptionPolicy:
+                allowInterruption: false
+
+              variable: Topic.ZipCodeInput
+              prompt: ZIP code is required to look up per diem. What's the 5-digit ZIP?
+              entity: StringPrebuiltEntity
+
+            - kind: SetVariable
+              id: setVariable_SetZipFromFinalInput
+              displayName: Set Zip From Final Input
+              variable: Topic.ZipCode
+              value: =Topic.ZipCodeInput
+
+            - kind: SetVariable
+              id: setVariable_ZipCodeNormFinal
+              displayName: Zip Code Norm (Final)
+              variable: Topic.ZipCodeNorm
+              value: =Coalesce(Match(Trim(Coalesce(Topic.ZipCode, "")), "[0-9]{5}").FullMatch, "")
+
+    - kind: SetVariable
+      id: setVariable_TravelDateForLookup
+      displayName: Travel Date For Lookup
+      variable: Topic.TravelDateForLookup
+      value: =Trim(Topic.TravelDateText)
+
+    - kind: ConditionGroup
+      id: conditionGroup_AbortIfZipMissing
+      displayName: Abort If Zip Missing
+      conditions:
+        - id: conditionItem_AbortIfZipMissing
+          displayName: Abort If Zip Missing
+          condition: =!IsMatch(Topic.ZipCodeNorm, "^[0-9]{5}$")
+          actions:
+            - kind: SendActivity
+              id: sendActivity_ZipMissingBeforeLookup
+              displayName: Zip Missing Before Lookup
+              activity: ZIP code must be 5 digits. Say "add per diem" to try again.
+
+            - kind: EndDialog
+              id: endDialog_ZipMissingBeforeLookup
+              displayName: Zip Missing Before Lookup
+
+    - kind: SetVariable
+      id: setVariable_InitPerDiemOk
+      displayName: Init Per Diem Ok
+      variable: Topic.PerDiemOk
+      value: =false
+
+    - kind: SetVariable
+      id: setVariable_InitMieRate
+      displayName: Init Mie Rate
+      variable: Topic.MieRate
+      value: =Blank()
+
+    - kind: SetVariable
+      id: setVariable_InitPerDiemError
+      displayName: Init Per Diem Error
+      variable: Topic.PerDiemError
+      value: =""
+
+    - kind: BeginDialog
+      id: beginDialog_PerDiemLookup
+      displayName: Per Diem Lookup
+      input:
+        binding:
+          travelDate: =Topic.TravelDateForLookup
+          zipCode: =Topic.ZipCodeNorm
+
+      dialog: new_agent.action.TravelExpense-PerDiemLookup
+      output:
+        binding:
+          error: Topic.PerDiemError
+          mieRate: Topic.MieRate
+          ok: Topic.PerDiemOk
+
+    - kind: ConditionGroup
+      id: conditionGroup_PerDiemLookupFailed
+      displayName: Per Diem Lookup Failed
+      conditions:
+        - id: conditionItem_PerDiemLookupFailed
+          condition: =Topic.PerDiemOk <> true || IsBlank(Topic.MieRate)
+          displayName: Per Diem Lookup Failed
+          actions:
+            - kind: SendActivity
+              id: sendActivity_PerDiemLookupFailed
+              displayName: Per Diem Lookup Failed
+              activity: "Per diem lookup failed. zip: {Topic.ZipCodeNorm}. Error: {Topic.PerDiemError}"
+
+            - kind: ConditionGroup
+              id: conditionGroup_PerDiemLookupFailedZip
+              displayName: Lookup Failed (Zip)
+              conditions:
+                - id: conditionItem_PerDiemLookupFailedZip
+                  condition: =Find("zip", Lower(Coalesce(Topic.PerDiemError, ""))) > 0
+                  displayName: Lookup Failed (Zip)
+                  actions:
+                    - kind: SetVariable
+                      id: setVariable_ClearZipAfterLookupFail
+                      displayName: Clear Zip After Lookup Fail
+                      variable: Topic.ZipCodeInput
+                      value: =""
+
+                    - kind: Question
+                      id: question_ZipCodeAfterLookupFail
+                      displayName: Zip Code (Retry)
+                      interruptionPolicy:
+                        allowInterruption: false
+
+                      variable: Topic.ZipCodeInput
+                      prompt: ZIP code must be 5 digits. What's the 5-digit ZIP?
+                      entity: StringPrebuiltEntity
+
+                    - kind: SetVariable
+                      id: setVariable_SetZipFromAfterLookupFailInput
+                      displayName: Set Zip From After Lookup Fail Input
+                      variable: Topic.ZipCode
+                      value: =Topic.ZipCodeInput
+
+                    - kind: SetVariable
+                      id: setVariable_ZipCodeNormAfterLookupFail
+                      displayName: Zip Code Norm (Retry)
+                      variable: Topic.ZipCodeNorm
+                      value: =Coalesce(Match(Trim(Coalesce(Topic.ZipCode, "")), "[0-9]{5}").FullMatch, "")
+
+                    - kind: BeginDialog
+                      id: beginDialog_PerDiemLookupRetry
+                      displayName: Per Diem Lookup (Retry)
+                      input:
+                        binding:
+                          travelDate: =Topic.TravelDateForLookup
+                          zipCode: =Topic.ZipCodeNorm
+
+                      dialog: new_agent.action.TravelExpense-PerDiemLookup
+                      output:
+                        binding:
+                          error: Topic.PerDiemError
+                          mieRate: Topic.MieRate
+                          ok: Topic.PerDiemOk
+
+            - kind: ConditionGroup
+              id: conditionGroup_FallbackDailyRateIfStillFailed
+              displayName: Fallback Daily Rate If Still Failed
+              conditions:
+                - id: conditionItem_StillFailedAfterRetry
+                  displayName: Still Failed After Retry
+                  condition: =(Topic.PerDiemOk <> true || IsBlank(Topic.MieRate)) && Find("zip", Lower(Coalesce(Topic.PerDiemError, ""))) <= 0
+                  actions:
+                    - kind: Question
+                      id: question_DailyRateFallback
+                      displayName: Daily Rate (Fallback)
+                      interruptionPolicy:
+                        allowInterruption: false
+                      variable: Topic.DailyRate
+                      prompt: I couldn't look up the per diem rate. What is the per diem daily rate (USD)?
+                      entity: NumberPrebuiltEntity
+
+            - kind: ConditionGroup
+              id: conditionGroup_AbortIfZipStillInvalid
+              displayName: Abort If Zip Still Invalid
+              conditions:
+                - id: conditionItem_AbortIfZipStillInvalid
+                  displayName: Abort If Zip Still Invalid
+                  condition: =(Topic.PerDiemOk <> true || IsBlank(Topic.MieRate)) && Find("zip", Lower(Coalesce(Topic.PerDiemError, ""))) > 0
+                  actions:
+                    - kind: SendActivity
+                      id: sendActivity_AbortZipInvalid
+                      displayName: Abort Zip Invalid
+                      activity: ZIP code must be 5 digits. Say "add per diem" to try again.
+
+                    - kind: EndDialog
+                      id: endDialog_AbortZipInvalid
+                      displayName: Abort Zip Invalid
+
+      elseActions:
+        - kind: SetVariable
+          id: setVariable_DailyRateFromLookup
+          displayName: Daily Rate From Lookup
+          variable: Topic.DailyRate
+          value: =Value(Topic.MieRate)
+
+    - kind: SetVariable
+      id: setVariable_ActivityCode
+      displayName: Activity Code
+      variable: Topic.ActivityCode
+      value: =If(Find("wellness", Lower(Coalesce(System.Activity.Text, ""))) > 0, "790", If(Find("train", Lower(Coalesce(System.Activity.Text, ""))) > 0 || Find("conference", Lower(Coalesce(System.Activity.Text, ""))) > 0 || Find("cert", Lower(Coalesce(System.Activity.Text, ""))) > 0 || Find("education", Lower(Coalesce(System.Activity.Text, ""))) > 0, "770", If(Find("meal", Lower(Coalesce(System.Activity.Text, ""))) > 0 || Find("cater", Lower(Coalesce(System.Activity.Text, ""))) > 0, "710", "700")))
+
+    - kind: SetVariable
+      id: setVariable_GlOverride
+      displayName: GL Override
+      variable: Topic.GlOverride
+      value: =If(Global.IsCapital = true || !IsBlank(Global.WorkOrder), "107200", "")
+
+    - kind: SetVariable
+      id: setVariable_Amount
+      displayName: Amount
+      variable: Topic.Amount
+      value: =Value(Topic.Days) * Value(Topic.Travelers) * Value(Topic.DailyRate)
+
+    - kind: ConditionGroup
+      id: conditionGroup_ValidateAmount
+      displayName: Validate Amount
+      conditions:
+        - id: conditionItem_AmountInvalid
+          condition: =Coalesce(Value(Topic.Amount), 0) <= 0
+          displayName: Amount Invalid
+          actions:
+            - kind: SendActivity
+              id: sendActivity_AmountInvalid
+              displayName: Amount Invalid
+              activity: I still don't have a valid per diem day count. Let's fix that.
+
+            - kind: Question
+              id: question_DaysFinal
+              displayName: Days (Final)
+              interruptionPolicy:
+                allowInterruption: false
+
+              variable: Topic.Days
+              prompt: "How many days is this per diem for? (example: 2)"
+              entity: NumberPrebuiltEntity
+
+            - kind: SetVariable
+              id: setVariable_RecalcAmount
+              displayName: Recalc Amount
+              variable: Topic.Amount
+              value: =Value(Topic.Days) * Value(Topic.Travelers) * Value(Topic.DailyRate)
+
+            - kind: ConditionGroup
+              id: conditionGroup_AmountStillInvalid
+              displayName: Amount Still Invalid
+              conditions:
+                - id: conditionItem_AmountStillInvalid
+                  condition: =Coalesce(Value(Topic.Amount), 0) <= 0
+                  displayName: Amount Still Invalid
+                  actions:
+                    - kind: SendActivity
+                      id: sendActivity_AbortInvalidAmount
+                      displayName: Abort Invalid Amount
+                      activity: Sorry - I couldn't get a valid day count, so I didn't add anything. Say "per diem" to try again.
+
+                    - kind: EndDialog
+                      id: endDialog_AbortInvalidAmount
+                      displayName: Abort Invalid Amount
+
+    - kind: SetVariable
+      id: setVariable_Reference
+      displayName: Reference
+      variable: Topic.Reference
+      value: =Left(Concatenate("PerDiem ", Topic.ZipCodeNorm, " ", Topic.TravelDateText, " x", Text(Value(Topic.Days), "0")), 60)
+
+    - kind: BeginDialog
+      id: beginDialog_GetExpenseCodes
+      displayName: Get Expense Codes
+      input:
+        binding:
+          activityCode: =Topic.ActivityCode
+          departmentCode: =Global.DepartmentCode
+
+      dialog: new_agent.action.TravelExpense-ExpenseCodesLookup
+      output:
+        binding:
+          matches: Topic.ExpenseCodesMatches
+
+    - kind: ConditionGroup
+      id: conditionGroup_NoMatches
+      displayName: No Matches
+      conditions:
+        - id: conditionItem_NoMatches
+          condition: =CountRows(Topic.ExpenseCodesMatches) = 0
+          displayName: No Matches
+          actions:
+            - kind: ConditionGroup
+              id: conditionGroup_StillNoMatches
+              displayName: Still No Matches
+              conditions:
+                - id: conditionItem_StillNoMatches
+                  condition: =CountRows(Topic.ExpenseCodesMatches) = 0
+                  displayName: Still No Matches
+                  actions:
+                    - kind: SendActivity
+                      id: sendActivity_NoMatches
+                      displayName: No Matches
+                      activity: |-
+                        I couldn't find a valid account code for Dept {Global.DepartmentCode} with the default travel category.
+
+                        Let's try a different category.
+
+                    - kind: Question
+                      id: question_ActivityFallback
+                      displayName: Activity Fallback
+                      interruptionPolicy:
+                        allowInterruption: false
+
+                      variable: Topic.ActivityChoice
+                      prompt: "Which best fits this trip: general travel, meals/events, training, or wellness?"
+                      entity: StringPrebuiltEntity
+
+                    - kind: SetVariable
+                      id: setVariable_ActivityChoiceNorm
+                      displayName: Activity Choice Norm
+                      variable: Topic.ActivityChoiceNorm
+                      value: =Lower(Trim(Topic.ActivityChoice))
+
+                    - kind: SetVariable
+                      id: setVariable_ActivityCodeFromChoice
+                      displayName: Activity Code From Choice
+                      variable: Topic.ActivityCode
+                      value: =If(Topic.ActivityChoiceNorm = "710" || Find("meal", Topic.ActivityChoiceNorm) > 0 || Find("event", Topic.ActivityChoiceNorm) > 0, "710", If(Topic.ActivityChoiceNorm = "770" || Find("train", Topic.ActivityChoiceNorm) > 0 || Find("conf", Topic.ActivityChoiceNorm) > 0 || Find("cert", Topic.ActivityChoiceNorm) > 0 || Find("educat", Topic.ActivityChoiceNorm) > 0, "770", If(Topic.ActivityChoiceNorm = "790" || Find("wellness", Topic.ActivityChoiceNorm) > 0, "790", "700")))
+
+                    - kind: BeginDialog
+                      id: beginDialog_GetExpenseCodes_RetryActivity
+                      displayName: Get Expense Codes (Retry Activity)
+                      input:
+                        binding:
+                          activityCode: =Topic.ActivityCode
+                          departmentCode: =Global.DepartmentCode
+
+                      dialog: new_agent.action.TravelExpense-ExpenseCodesLookup
+                      output:
+                        binding:
+                          matches: Topic.ExpenseCodesMatches
+
+                    - kind: ConditionGroup
+                      id: conditionGroup_StillNoMatchesAfterActivity
+                      displayName: Still No Matches After Activity
+                      conditions:
+                        - id: conditionItem_StillNoMatchesAfterActivity
+                          condition: =CountRows(Topic.ExpenseCodesMatches) = 0
+                          displayName: Still No Matches After Activity
+                          actions:
+                            - kind: SendActivity
+                              id: sendActivity_NoMatchesAfterActivity
+                              displayName: No Matches After Activity
+                              activity: No valid account codes found for Dept {Global.DepartmentCode}. Try "change department".
+
+                            - kind: EndDialog
+                              id: endDialog_NoMatches
+                              displayName: No Matches
+
+    - kind: ConditionGroup
+      id: conditionGroup_SelectAccount
+      displayName: Select Account
+      conditions:
+        - id: conditionItem_SingleMatch
+          condition: =CountRows(Topic.ExpenseCodesMatches) = 1
+          displayName: Single Match
+          actions:
+            - kind: SetVariable
+              id: setVariable_SelectedAccount_Single
+              displayName: Selected Account Single
+              variable: Topic.SelectedAccountCode
+              value: =First(Topic.ExpenseCodesMatches).accountCode
+
+      elseActions:
+        - kind: SetVariable
+          id: setVariable_MatchesText
+          displayName: Matches Text
+          variable: Topic.MatchesText
+          value: =Concat(Topic.ExpenseCodesMatches, accountCode & If(IsBlank(description), "", " - " & description) & Char(10))
+
+        - kind: SendActivity
+          id: sendActivity_MultipleMatches
+          displayName: Multiple Matches
+          activity: |-
+            I found multiple valid account codes. Type the account code you want to use:
+
+            {Topic.MatchesText}
+
+        - kind: Question
+          id: question_SelectedAccount
+          displayName: Selected Account
+          interruptionPolicy:
+            allowInterruption: false
+
+          variable: Topic.SelectedAccountCode
+          prompt: Account code?
+          entity: StringPrebuiltEntity
+
+        - kind: SetVariable
+          id: setVariable_NormalizeSelectedAccount
+          displayName: Normalize Selected Account
+          variable: Topic.SelectedAccountCode
+          value: =Trim(Topic.SelectedAccountCode)
+
+        - kind: ConditionGroup
+          id: conditionGroup_InvalidAccountSelection
+          displayName: Invalid Account Selection
+          conditions:
+            - id: conditionItem_InvalidAccountSelection
+              condition: =CountRows(Filter(Topic.ExpenseCodesMatches, accountCode = Topic.SelectedAccountCode)) = 0
+              displayName: Invalid Account Selection
+              actions:
+                - kind: SendActivity
+                  id: sendActivity_InvalidAccountSelection
+                  displayName: Invalid Account Selection
+                  activity: That account code isn't in the valid list. Please run "add per diem" again and select a code from the list.
+
+                - kind: EndDialog
+                  id: endDialog_InvalidAccountSelection
+                  displayName: Invalid Account Selection
+
+    - kind: SetVariable
+      id: setVariable_DailyRateText
+      displayName: Daily Rate Text
+      variable: Topic.DailyRateText
+      value: =Concatenate("$", Text(Value(Topic.DailyRate), "0.00"))
+
+    - kind: SetVariable
+      id: setVariable_AmountText
+      displayName: Amount Text
+      variable: Topic.AmountText
+      value: =Concatenate("$", Text(Value(Topic.Amount), "0.00"))
+
+    - kind: SendActivity
+      id: sendActivity_Summary
+      displayName: Summary
+      activity: |-
+        Proposed per diem:
+        - Dept: {Global.DepartmentCode}
+        - Activity: {Topic.ActivityCode}
+        - Account: {Topic.SelectedAccountCode}
+        - GL override: {Topic.GlOverride}
+        - Days: {Topic.Days}
+        - Travelers: {Topic.Travelers}
+        - Daily rate: {Topic.DailyRateText}
+        - Amount: {Topic.AmountText}
+
+    - kind: Question
+      id: question_ApproveAdd
+      displayName: Approve Add
+      interruptionPolicy:
+        allowInterruption: false
+
+      variable: Topic.ApproveAdd
+      prompt: Approve and add this to the draft? (yes/no)
+      entity: BooleanPrebuiltEntity
+
+    - kind: ConditionGroup
+      id: conditionGroup_AddToDraft
+      displayName: Add To Draft
+      conditions:
+        - id: conditionItem_AddToDraft
+          condition: =Topic.ApproveAdd = true
+          displayName: Add To Draft
+          actions:
+            - kind: SetVariable
+              id: setVariable_ReferenceSafe
+              displayName: Reference Safe
+              variable: Topic.ReferenceSafe
+              value: =Substitute(Substitute(Substitute(Topic.Reference, Char(34), "'"), Char(10), " "), Char(13), " ")
+
+            - kind: SetVariable
+              id: setVariable_NewItemJson
+              displayName: New Item JSON
+              variable: Topic.NewItemJson
+              value: =Concatenate("{", Char(34), "mode", Char(34), ":", Char(34), "PerDiem", Char(34), ",", Char(34), "departmentCode", Char(34), ":", Char(34), Global.DepartmentCode, Char(34), ",", Char(34), "activityCode", Char(34), ":", Char(34), Topic.ActivityCode, Char(34), ",", Char(34), "accountCode", Char(34), ":", Char(34), Topic.SelectedAccountCode, Char(34), ",", Char(34), "glAccountOverride", Char(34), ":", Char(34), Topic.GlOverride, Char(34), ",", Char(34), "reference", Char(34), ":", Char(34), Topic.ReferenceSafe, Char(34), ",", Char(34), "amountTotal", Char(34), ":", Text(Value(Topic.Amount), "0.00"), "}")
+
+            - kind: SetVariable
+              id: setVariable_AppendDraftItemsJson
+              displayName: Append Draft Items JSON
+              variable: Global.DraftItemsJson
+              value: =If(IsBlank(Global.DraftItemsJson) || Global.DraftItemsJson = "[]", Concatenate("[", Topic.NewItemJson, "]"), Concatenate(Left(Global.DraftItemsJson, Len(Global.DraftItemsJson) - 1), ",", Topic.NewItemJson, "]"))
+
+            - kind: SetVariable
+              id: setVariable_IncDraftItemCount
+              displayName: Inc Draft Item Count
+              variable: Global.DraftItemCount
+              value: =If(IsBlank(Global.DraftItemCount), 0, Global.DraftItemCount) + 1
+
+            - kind: SetVariable
+              id: setVariable_AddPerDiemTotal
+              displayName: Add Per Diem Total
+              variable: Global.TotalPerDiemAmount
+              value: =If(IsBlank(Global.TotalPerDiemAmount), 0, Global.TotalPerDiemAmount) + Value(Topic.Amount)
+
+            - kind: SetVariable
+              id: setVariable_AppendDraftSummaryText
+              displayName: Append Draft Summary Text
+              variable: Global.DraftSummaryText
+              value: "=Concatenate(If(IsBlank(Global.DraftSummaryText), \"\", Global.DraftSummaryText & Char(10)), \"- PerDiem: \", Topic.Reference, \" $\", Text(Value(Topic.Amount), \"0.00\"), \" (Dept \", Global.DepartmentCode, \", Act \", Topic.ActivityCode, \", Acct \", Topic.SelectedAccountCode, If(!IsBlank(Topic.GlOverride), \", GLOverride \" & Topic.GlOverride, \"\"), \")\")"
+
+            - kind: SendActivity
+              id: sendActivity_Added
+              displayName: Added
+              activity: Added. Say "add receipt", "add per diem", "add mileage", "review draft", or "submit".
+
+            - kind: EndDialog
+              id: endDialog_Added
+              displayName: Added
+
+      elseActions:
+        - kind: SendActivity
+          id: sendActivity_NotAdded
+          displayName: Not Added
+          activity: Okay — not added. Say "add per diem" when you're ready.
+
+        - kind: EndDialog
+          id: endDialog_NotAdded
+          displayName: Not Added
+
+inputType: {}
+outputType: {}

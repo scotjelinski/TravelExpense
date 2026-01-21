@@ -1,0 +1,307 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Change identity context for the current draft (submit on behalf, department override, and optional work order/capital flags).
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  displayName: Main
+  intent: {}
+  actions:
+    - kind: BeginDialog
+      id: beginDialog_InitContext
+      displayName: Init Context
+      dialog: new_agent.topic.9InitContext
+      input: {}
+      output: {}
+
+    - kind: SetVariable
+      id: setVariable_LastTopic
+      displayName: Last Topic
+      variable: Global.LastTopic
+      value: ="identity"
+
+    - kind: SetVariable
+      id: setVariable_InitApiBaseUrlGlobal
+      displayName: Init API Base URL Global
+      variable: Global.ApiBaseUrl
+      value: =If(IsBlank(Global.ApiBaseUrl), "https://departmentcodes-gnfncpgxdueyfdh9.eastus2-01.azurewebsites.net", Global.ApiBaseUrl)
+
+    - kind: SendActivity
+      id: sendActivity_CurrentContext
+      displayName: Current Context
+      activity: |-
+        Current draft context:
+        - Email: {Global.RequesterEmail}
+        - Dept: {Global.DepartmentCode} {Global.DepartmentName}
+        - WorkOrder: {Global.WorkOrder}
+        - IsCapital: {Global.IsCapital}
+
+    - kind: Question
+      id: question_ChangeUser
+      displayName: Change User
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.ChangeUser
+      entity: BooleanPrebuiltEntity
+      prompt: Submit on behalf of another user? (yes/no)
+
+    - kind: ConditionGroup
+      id: conditionGroup_ChangeUser
+      displayName: Change User
+      conditions:
+        - id: conditionItem_ChangeUserYes
+          displayName: Change User (Yes)
+          condition: =Topic.ChangeUser = true
+          actions:
+            - kind: Question
+              id: question_NewEmail
+              displayName: New Email
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.NewEmailInput
+              entity: StringPrebuiltEntity
+              prompt: What's the other user's CORE email (UPN)?
+
+            - kind: SetVariable
+              id: setVariable_NewEmailNorm
+              displayName: New Email Norm
+              variable: Topic.NewEmail
+              value: =Lower(Trim(Topic.NewEmailInput))
+
+            - kind: SetVariable
+              id: setVariable_SetRequesterEmail
+              displayName: Set Requester Email
+              variable: Global.RequesterEmail
+              value: =Topic.NewEmail
+
+            - kind: SetVariable
+              id: setVariable_SetIdentityCapturedForNewUser
+              displayName: Set Identity Captured (New User)
+              variable: Global.IdentityCaptured
+              value: =true
+
+            - kind: SetVariable
+              id: setVariable_ClearDeptOnUserChange
+              displayName: Clear Dept On User Change
+              variable: Global.DepartmentCode
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ClearDeptNameOnUserChange
+              displayName: Clear Dept Name On User Change
+              variable: Global.DepartmentName
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ClearOrgChartStateOnUserChange
+              displayName: Clear OrgChart State On User Change
+              variable: Global.OrgChartOk
+              value: =false
+
+            - kind: SetVariable
+              id: setVariable_ClearOrgChartStateOnUserChange2
+              displayName: Clear OrgChart State On User Change 2
+              variable: Global.OrgChartFound
+              value: =false
+
+            - kind: SetVariable
+              id: setVariable_ClearOrgChartStateOnUserChange3
+              displayName: Clear OrgChart State On User Change 3
+              variable: Global.OrgChartError
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ClearOrgChartStateOnUserChange4
+              displayName: Clear OrgChart State On User Change 4
+              variable: Global.OrgChartEmail
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ClearOrgChartStateOnUserChange5
+              displayName: Clear OrgChart State On User Change 5
+              variable: Global.OrgChartDepartmentCode
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ClearOrgChartStateOnUserChange6
+              displayName: Clear OrgChart State On User Change 6
+              variable: Global.OrgChartDepartmentName
+              value: =""
+
+            - kind: BeginDialog
+              id: beginDialog_ReInitContextAfterUserChange
+              displayName: Re-Init Context After User Change
+              dialog: new_agent.topic.9InitContext
+              input: {}
+              output: {}
+
+    - kind: SetVariable
+      id: setVariable_InitDeptOverride
+      displayName: Init Dept Override
+      variable: Topic.OverrideDept
+      value: =false
+
+    - kind: ConditionGroup
+      id: conditionGroup_DeptOverride
+      displayName: Dept Override
+      conditions:
+        - id: conditionItem_DeptMissing
+          displayName: Dept Missing
+          condition: =Len(Trim(Coalesce(Global.DepartmentCode, ""))) = 0
+          actions:
+            - kind: SendActivity
+              id: sendActivity_DeptMissing
+              displayName: Dept Missing
+              activity: I couldn't determine a department code. Please enter your 3-digit department code.
+
+            - kind: SetVariable
+              id: setVariable_DeptCodeInput_Init
+              displayName: Dept Code Input Init
+              variable: Topic.DepartmentCodeInput
+              value: =""
+
+            - kind: Question
+              id: question_DepartmentCode
+              displayName: Department Code
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.DepartmentCodeInput
+              entity: StringPrebuiltEntity
+              prompt: 3-digit department code?
+
+        - id: conditionItem_DeptPresent
+          displayName: Dept Present
+          condition: =Len(Trim(Coalesce(Global.DepartmentCode, ""))) > 0
+          actions:
+            - kind: Question
+              id: question_OverrideDept
+              displayName: Override Dept
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.OverrideDept
+              entity: BooleanPrebuiltEntity
+              prompt: Override department code (currently {Global.DepartmentCode})? (yes/no)
+
+            - kind: ConditionGroup
+              id: conditionGroup_OverrideDeptYes
+              displayName: Override Dept (Yes)
+              conditions:
+                - id: conditionItem_OverrideDeptYes
+                  displayName: Override Dept (Yes)
+                  condition: =Topic.OverrideDept = true
+                  actions:
+                    - kind: SetVariable
+                      id: setVariable_DeptCodeInput_Reset
+                      displayName: Dept Code Input Reset
+                      variable: Topic.DepartmentCodeInput
+                      value: =""
+
+                    - kind: Question
+                      id: question_DepartmentCodeOverride
+                      displayName: Department Code (Override)
+                      interruptionPolicy:
+                        allowInterruption: false
+                      variable: Topic.DepartmentCodeInput
+                      entity: StringPrebuiltEntity
+                      prompt: New 3-digit department code?
+
+    - kind: SetVariable
+      id: setVariable_DepartmentCodeNorm
+      displayName: Department Code Norm
+      variable: Topic.DepartmentCodeNorm
+      value: =Coalesce(Match(Trim(Coalesce(Topic.DepartmentCodeInput, "")), "[0-9]{3}").FullMatch, "")
+
+    - kind: ConditionGroup
+      id: conditionGroup_ValidateDept
+      displayName: Validate Dept
+      conditions:
+        - id: conditionItem_DeptInvalid
+          displayName: Dept Invalid
+          condition: =(Len(Trim(Coalesce(Topic.DepartmentCodeInput, ""))) > 0 || Len(Trim(Coalesce(Global.DepartmentCode, ""))) = 0) && !IsMatch(Topic.DepartmentCodeNorm, "^[0-9]{3}$")
+          actions:
+            - kind: Question
+              id: question_DepartmentCodeRetry
+              displayName: Department Code Retry
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.DepartmentCodeInput
+              entity: StringPrebuiltEntity
+              prompt: Dept code must be 3 digits. What's the 3-digit dept code?
+
+            - kind: SetVariable
+              id: setVariable_DepartmentCodeNormRetry
+              displayName: Department Code Norm Retry
+              variable: Topic.DepartmentCodeNorm
+              value: =Coalesce(Match(Trim(Coalesce(Topic.DepartmentCodeInput, "")), "[0-9]{3}").FullMatch, "")
+
+    - kind: ConditionGroup
+      id: conditionGroup_ApplyDeptOverride
+      displayName: Apply Dept Override
+      conditions:
+        - id: conditionItem_ApplyDeptOverride
+          displayName: Apply Dept Override
+          condition: =IsMatch(Topic.DepartmentCodeNorm, "^[0-9]{3}$")
+          actions:
+            - kind: SetVariable
+              id: setVariable_SetDeptCode
+              displayName: Set Dept Code
+              variable: Global.DepartmentCode
+              value: =Topic.DepartmentCodeNorm
+
+            - kind: SetVariable
+              id: setVariable_ClearDeptName
+              displayName: Clear Dept Name
+              variable: Global.DepartmentName
+              value: =If(Topic.OverrideDept = true, "", Global.DepartmentName)
+
+    - kind: Question
+      id: question_WorkOrder
+      displayName: Work Order
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.WorkOrderInput
+      entity: StringPrebuiltEntity
+      prompt: Any work order for this trip? Type it, or type "none".
+
+    - kind: SetVariable
+      id: setVariable_WorkOrderNorm
+      displayName: Work Order Norm
+      variable: Topic.WorkOrderNorm
+      value: =Lower(Trim(Coalesce(Topic.WorkOrderInput, "")))
+
+    - kind: SetVariable
+      id: setVariable_SetWorkOrder
+      displayName: Set Work Order
+      variable: Global.WorkOrder
+      value: =If(Topic.WorkOrderNorm = "none" || Topic.WorkOrderNorm = "no" || Topic.WorkOrderNorm = "na" || Topic.WorkOrderNorm = "n/a" || Topic.WorkOrderNorm = "", "", Trim(Topic.WorkOrderInput))
+
+    - kind: Question
+      id: question_IsCapital
+      displayName: Is Capital
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.IsCapital
+      entity: BooleanPrebuiltEntity
+      prompt: Is this a capital project? (yes/no)
+
+    - kind: SetVariable
+      id: setVariable_SetIsCapital
+      displayName: Set Is Capital
+      variable: Global.IsCapital
+      value: =If(Topic.IsCapital = true || !IsBlank(Global.WorkOrder), true, false)
+
+    - kind: SendActivity
+      id: sendActivity_Summary
+      displayName: Summary
+      activity: |-
+        Saved for this draft:
+        - Email: {Global.RequesterEmail}
+        - Dept: {Global.DepartmentCode} {Global.DepartmentName}
+        - WorkOrder: {Global.WorkOrder}
+        - IsCapital: {Global.IsCapital}
+
+    - kind: EndDialog
+      id: endDialog_Identity
+      displayName: Identity
+inputType: {}
+outputType: {}

@@ -1,0 +1,436 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Entry point for the Travel Expense bot.
+  Initializes draft variables and tells the user what to do next.
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  intent:
+    triggerQueries:
+      - help
+      - reset
+      - restart
+      - start over
+      - new draft
+      - clear context
+      - clear draft
+      - add receipt
+      - receipt
+      - add per diem
+      - per diem
+      - perdiem
+      - add mileage
+      - mileage
+      - miles
+      - review draft
+      - review
+      - submit
+      - send
+      - change department
+      - change dept
+      - change user
+      - debug
+      - travel expense
+      - expense report
+      - travel reimbursement
+      - expense reimbursement
+      - reimbursement request
+      - submit travel expense
+      - submit expense report
+      - travel expense draft
+
+  displayName: Main
+  actions:
+    - kind: SetVariable
+      id: setVariable_RouterVersion
+      displayName: Router Version
+      variable: Global.RouterVersion
+      value: ="2026-01-19"
+
+    - kind: BeginDialog
+      id: beginDialog_InitContext
+      displayName: Init Context
+      input: {}
+      dialog: new_agent.topic.9InitContext
+      output: {}
+
+    - kind: SetVariable
+      id: setVariable_InitApiBaseUrl
+      displayName: Init API Base URL
+      variable: Global.ApiBaseUrl
+      value: =If(IsBlank(Global.ApiBaseUrl), "https://departmentcodes-gnfncpgxdueyfdh9.eastus2-01.azurewebsites.net", Global.ApiBaseUrl)
+
+    - kind: SetVariable
+      id: setVariable_InitMileageRate
+      displayName: Init Mileage Rate
+      variable: Global.MileageRate
+      value: =If(IsBlank(Global.MileageRate), 0.70, Global.MileageRate)
+
+    - kind: SetVariable
+      id: setVariable_InitDraftItemsJson
+      displayName: Init Draft Items JSON
+      variable: Global.DraftItemsJson
+      value: =If(IsBlank(Global.DraftItemsJson), "[]", Global.DraftItemsJson)
+
+    - kind: SetVariable
+      id: setVariable_InitDraftItemCount
+      displayName: Init Draft Item Count
+      variable: Global.DraftItemCount
+      value: =If(IsBlank(Global.DraftItemCount), 0, Global.DraftItemCount)
+
+    - kind: SetVariable
+      id: setVariable_InitReceiptItemCount
+      displayName: Init Receipt Item Count
+      variable: Global.ReceiptItemCount
+      value: =If(IsBlank(Global.ReceiptItemCount), 0, Global.ReceiptItemCount)
+
+    - kind: SetVariable
+      id: setVariable_InitTotalReceiptAmount
+      displayName: Init Total Receipt Amount
+      variable: Global.TotalReceiptAmount
+      value: =If(IsBlank(Global.TotalReceiptAmount), 0, Global.TotalReceiptAmount)
+
+    - kind: SetVariable
+      id: setVariable_InitTotalPerDiemAmount
+      displayName: Init Total Per Diem Amount
+      variable: Global.TotalPerDiemAmount
+      value: =If(IsBlank(Global.TotalPerDiemAmount), 0, Global.TotalPerDiemAmount)
+
+    - kind: SetVariable
+      id: setVariable_InitTotalMileageAmount
+      displayName: Init Total Mileage Amount
+      variable: Global.TotalMileageAmount
+      value: =If(IsBlank(Global.TotalMileageAmount), 0, Global.TotalMileageAmount)
+
+    - kind: SetVariable
+      id: setVariable_InitDraftSummaryText
+      displayName: Init Draft Summary Text
+      variable: Global.DraftSummaryText
+      value: =If(IsBlank(Global.DraftSummaryText), "", Global.DraftSummaryText)
+
+    - kind: SetVariable
+      id: setVariable_InitWorkOrder
+      displayName: Init Work Order
+      variable: Global.WorkOrder
+      value: =If(IsBlank(Global.WorkOrder), "", Global.WorkOrder)
+
+    - kind: SetVariable
+      id: setVariable_InitIsCapital
+      displayName: Init Is Capital
+      variable: Global.IsCapital
+      value: =If(IsBlank(Global.IsCapital), false, Global.IsCapital)
+
+    - kind: SetVariable
+      id: setVariable_TextNorm
+      displayName: Text Norm
+      variable: Topic.TextNorm
+      value: =Lower(Trim(Coalesce(System.Activity.Text, "")))
+
+    - kind: SetVariable
+      id: setVariable_LastRouterText
+      displayName: Last Router Text
+      variable: Global.LastRouterText
+      value: =Topic.TextNorm
+
+    - kind: ConditionGroup
+      id: conditionGroup_Route
+      displayName: Route
+      conditions:
+        - id: conditionItem_RouteReset
+          condition: =Find("reset", Topic.TextNorm) > 0 || Find("restart", Topic.TextNorm) > 0 || Find("start over", Topic.TextNorm) > 0 || Find("new draft", Topic.TextNorm) > 0 || Find("clear context", Topic.TextNorm) > 0
+          displayName: Route Reset
+          actions:
+            - kind: SetVariable
+              id: setVariable_LastRouteReset
+              displayName: Last Route
+              variable: Global.LastRoute
+              value: ="reset"
+
+            - kind: SetVariable
+              id: setVariable_ResetDraftItemsJson
+              displayName: Reset Draft Items JSON
+              variable: Global.DraftItemsJson
+              value: ="[]"
+
+            - kind: SetVariable
+              id: setVariable_ResetDraftItemCount
+              displayName: Reset Draft Item Count
+              variable: Global.DraftItemCount
+              value: =0
+
+            - kind: SetVariable
+              id: setVariable_ResetReceiptItemCount
+              displayName: Reset Receipt Item Count
+              variable: Global.ReceiptItemCount
+              value: =0
+
+            - kind: SetVariable
+              id: setVariable_ResetTotals
+              displayName: Reset Totals
+              variable: Global.TotalReceiptAmount
+              value: =0
+
+            - kind: SetVariable
+              id: setVariable_ResetTotals2
+              displayName: Reset Totals 2
+              variable: Global.TotalPerDiemAmount
+              value: =0
+
+            - kind: SetVariable
+              id: setVariable_ResetTotals3
+              displayName: Reset Totals 3
+              variable: Global.TotalMileageAmount
+              value: =0
+
+            - kind: SetVariable
+              id: setVariable_ResetDraftSummaryText
+              displayName: Reset Draft Summary Text
+              variable: Global.DraftSummaryText
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ResetWorkOrder
+              displayName: Reset Work Order
+              variable: Global.WorkOrder
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ResetIsCapital
+              displayName: Reset Is Capital
+              variable: Global.IsCapital
+              value: =false
+
+            - kind: SetVariable
+              id: setVariable_ResetIdentityEmail
+              displayName: Reset Identity Email
+              variable: Global.RequesterEmail
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ResetIdentityCaptured
+              displayName: Reset Identity Captured
+              variable: Global.IdentityCaptured
+              value: =false
+
+            - kind: SetVariable
+              id: setVariable_ResetDeptCode
+              displayName: Reset Dept Code
+              variable: Global.DepartmentCode
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ResetDeptName
+              displayName: Reset Dept Name
+              variable: Global.DepartmentName
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ResetOrgFlagsOk
+              displayName: Reset Org Flags Ok
+              variable: Global.OrgChartOk
+              value: =false
+
+            - kind: SetVariable
+              id: setVariable_ResetOrgFlagsFound
+              displayName: Reset Org Flags Found
+              variable: Global.OrgChartFound
+              value: =false
+
+            - kind: SetVariable
+              id: setVariable_ResetOrgEmail
+              displayName: Reset Org Email
+              variable: Global.OrgChartEmail
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ResetOrgDeptCode
+              displayName: Reset Org Dept Code
+              variable: Global.OrgChartDepartmentCode
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ResetOrgDeptName
+              displayName: Reset Org Dept Name
+              variable: Global.OrgChartDepartmentName
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_ResetOrgError
+              displayName: Reset Org Error
+              variable: Global.OrgChartError
+              value: =""
+
+            - kind: SendActivity
+              id: sendActivity_ResetDone
+              displayName: Reset Done
+              activity: Reset done. Say "add receipt", "add per diem", or "add mileage".
+
+            - kind: EndDialog
+              id: endDialog_RoutedReset
+              displayName: Routed Reset
+
+        - id: conditionItem_RoutePerDiem
+          condition: =Find("per diem", Topic.TextNorm) > 0 || Find("perdiem", Topic.TextNorm) > 0
+          displayName: Route Per Diem
+          actions:
+            - kind: SetVariable
+              id: setVariable_LastRoutePerDiem
+              displayName: Last Route
+              variable: Global.LastRoute
+              value: ="perdiem"
+
+            - kind: BeginDialog
+              id: beginDialog_ToPerDiem
+              dialog: new_agent.topic.TravelExpenseAddPerDiem
+
+            - kind: EndDialog
+              id: endDialog_RoutedPerDiem
+              displayName: Routed Per Diem
+
+        - id: conditionItem_RouteReceipt
+          condition: =Find("receipt", Topic.TextNorm) > 0 || Find("lodging", Topic.TextNorm) > 0 || Find("hotel", Topic.TextNorm) > 0 || Find("airfare", Topic.TextNorm) > 0 || Find("flight", Topic.TextNorm) > 0
+          displayName: Route Receipt
+          actions:
+            - kind: SetVariable
+              id: setVariable_LastRouteReceipt
+              displayName: Last Route
+              variable: Global.LastRoute
+              value: ="receipt"
+
+            - kind: BeginDialog
+              id: beginDialog_ToReceipt
+              dialog: new_agent.topic.TravelExpenseAddReceipt
+
+            - kind: EndDialog
+              id: endDialog_RoutedReceipt
+              displayName: Routed Receipt
+
+        - id: conditionItem_RouteMileage
+          condition: =Find("mileage", Topic.TextNorm) > 0 || Find("miles", Topic.TextNorm) > 0
+          displayName: Route Mileage
+          actions:
+            - kind: SetVariable
+              id: setVariable_LastRouteMileage
+              displayName: Last Route
+              variable: Global.LastRoute
+              value: ="mileage"
+
+            - kind: BeginDialog
+              id: beginDialog_ToMileage
+              dialog: new_agent.topic.TravelExpenseAddMileage
+
+            - kind: EndDialog
+              id: endDialog_RoutedMileage
+              displayName: Routed Mileage
+
+        - id: conditionItem_RouteReview
+          condition: =Find("review", Topic.TextNorm) > 0 || Find("draft", Topic.TextNorm) > 0
+          displayName: Route Review
+          actions:
+            - kind: SetVariable
+              id: setVariable_LastRouteReview
+              displayName: Last Route
+              variable: Global.LastRoute
+              value: ="review"
+
+            - kind: BeginDialog
+              id: beginDialog_ToReview
+              dialog: new_agent.topic.TravelExpenseReviewDraft
+
+            - kind: EndDialog
+              id: endDialog_RoutedReview
+              displayName: Routed Review
+
+        - id: conditionItem_RouteSubmit
+          condition: =Find("submit", Topic.TextNorm) > 0 || Find("send", Topic.TextNorm) > 0 || Find("email", Topic.TextNorm) > 0
+          displayName: Route Submit
+          actions:
+            - kind: SetVariable
+              id: setVariable_LastRouteSubmit
+              displayName: Last Route
+              variable: Global.LastRoute
+              value: ="submit"
+
+            - kind: BeginDialog
+              id: beginDialog_ToSubmit
+              dialog: new_agent.topic.TravelExpenseSubmitDraft
+
+            - kind: EndDialog
+              id: endDialog_RoutedSubmit
+              displayName: Routed Submit
+
+        - id: conditionItem_RouteChangeDept
+          condition: =Find("department", Topic.TextNorm) > 0 || Find("dept", Topic.TextNorm) > 0 || Find("change user", Topic.TextNorm) > 0 || Find("switch user", Topic.TextNorm) > 0 || Find("on behalf", Topic.TextNorm) > 0
+          displayName: Route Change Department
+          actions:
+            - kind: SetVariable
+              id: setVariable_LastRouteIdentity
+              displayName: Last Route
+              variable: Global.LastRoute
+              value: ="identity"
+
+            - kind: BeginDialog
+              id: beginDialog_ToIdentity
+              dialog: new_agent.topic.TravelExpenseChangeDepartment
+
+            - kind: EndDialog
+              id: endDialog_RoutedIdentity
+              displayName: Routed Identity
+
+        - id: conditionItem_RouteDebug
+          condition: =Find("debug", Topic.TextNorm) > 0 || Find("diagnostic", Topic.TextNorm) > 0
+          displayName: Route Debug
+          actions:
+            - kind: SetVariable
+              id: setVariable_LastRouteDebug
+              displayName: Last Route
+              variable: Global.LastRoute
+              value: ="debug"
+
+            - kind: BeginDialog
+              id: beginDialog_ToDebug
+              dialog: new_agent.topic.TravelExpenseDebug
+
+            - kind: EndDialog
+              id: endDialog_RoutedDebug
+              displayName: Routed Debug
+
+        - id: conditionItem_RouteHelp
+          condition: =Find("help", Topic.TextNorm) > 0
+          displayName: Route Help
+          actions:
+            - kind: SetVariable
+              id: setVariable_LastRouteHelp
+              displayName: Last Route
+              variable: Global.LastRoute
+              value: ="help"
+
+            - kind: BeginDialog
+              id: beginDialog_ToHelp
+              dialog: new_agent.topic.TravelExpenseHelpPolicy
+
+            - kind: EndDialog
+              id: endDialog_RoutedHelp
+              displayName: Routed Help
+
+    - kind: SendActivity
+      id: sendActivity_RouterHelp
+      displayName: Router Help
+      activity: |-
+        I can help you build a travel-expense draft (Receipt / Per Diem / Mileage) and submit it.
+
+        Say one of:
+        - "change department"
+        - "add receipt"
+        - "add per diem"
+        - "add mileage"
+        - "review draft"
+        - "submit"
+        - "help"
+
+    - kind: EndDialog
+      id: endDialog_Router
+      displayName: Router
+
+inputType: {}
+outputType: {}

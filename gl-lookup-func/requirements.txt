@@ -1,0 +1,13 @@
+# Uncomment to enable Azure Monitor OpenTelemetry
+# Ref: aka.ms/functions-azure-monitor-python
+# azure-monitor-opentelemetry
+# az account set --subscription "9dfda052-408a-4502-aeab-4bd9ee7e1823"
+# az login
+# cd .\gl-lookup-func\
+# func azure functionapp publish DepartmentCodes
+azure-functions
+azure-identity
+requests
+pypdf
+Pillow
+azure-storage-blob

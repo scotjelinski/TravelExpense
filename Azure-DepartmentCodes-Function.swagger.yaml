@@ -1,0 +1,488 @@
+swagger: '2.0'
+info:
+  title: TravelExpense
+  version: '1.16'
+  description: Azure Functions API for department/expense code lookup and report submission. Secured with an Azure Functions key sent as the `x-functions-key` header.
+
+host: departmentcodes-gnfncpgxdueyfdh9.eastus2-01.azurewebsites.net
+schemes:
+  - https
+basePath: /api
+consumes:
+  - application/json
+produces:
+  - application/json
+  - text/csv
+
+securityDefinitions:
+  function_key:
+    type: apiKey
+    name: x-functions-key
+    in: header
+
+security:
+  - function_key: []
+
+paths:
+  /health:
+    get:
+      operationId: health_check
+      summary: HealthCheck
+      description: HealthCheck
+      produces:
+        - application/json
+      responses:
+        '200':
+          description: OK
+          schema:
+            $ref: '#/definitions/HealthResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+
+  /expense-codes:
+    get:
+      operationId: get_expense_codes
+      summary: ExpenseCodesLookup
+      description: ExpenseCodesLookup
+      parameters:
+        - name: departmentCode
+          in: query
+          required: false
+          type: string
+        - name: activityCode
+          in: query
+          required: false
+          type: string
+      responses:
+        '200':
+          description: OK
+          schema:
+            $ref: '#/definitions/ExpenseCodesResponse'
+        '400':
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+
+  /orgchart-lookup:
+    get:
+      operationId: orgchart_lookup
+      summary: OrgChartLookup
+      description: OrgChartLookup
+      parameters:
+        - name: email
+          in: query
+          required: false
+          type: string
+      responses:
+        '200':
+          description: OK
+          schema:
+            $ref: '#/definitions/OrgChartLookupResponse'
+        '400':
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+
+  /orgchart-lookup-upn:
+    get:
+      operationId: orgchart_lookup_upn
+      summary: OrgChartLookupByUpn
+      description: OrgChartLookupByUpn
+      parameters:
+        - name: upn
+          in: query
+          required: false
+          type: string
+      responses:
+        '200':
+          description: OK
+          schema:
+            $ref: '#/definitions/OrgChartLookupResponse'
+        '400':
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+
+  /per-diem-lookup:
+    get:
+      operationId: per_diem_lookup
+      summary: PerDiemLookup
+      description: PerDiemLookup
+      parameters:
+        - name: zipCode
+          in: query
+          required: false
+          type: string
+        - name: travelDate
+          in: query
+          required: false
+          type: string
+      responses:
+        '200':
+          description: OK
+          schema:
+            $ref: '#/definitions/PerDiemLookupResponse'
+        '400':
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+
+  /import-csv:
+    post:
+      operationId: import_csv
+      summary: BuildImportCsv
+      description: BuildImportCsv
+      parameters:
+        - name: includeHeader
+          in: query
+          required: false
+          type: boolean
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/ImportCsvRequest'
+      produces:
+        - text/csv
+        - application/json
+      responses:
+        '200':
+          description: OK
+          schema:
+            type: string
+        '400':
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+
+  /submit-report:
+    post:
+      operationId: submit_report
+      summary: SubmitReport
+      description: SubmitReport
+      parameters:
+        - name: toEmail
+          in: query
+          required: false
+          type: string
+        - name: requesterEmail
+          in: query
+          required: false
+          type: string
+        - name: ccRequester
+          in: query
+          required: false
+          type: boolean
+        - name: subject
+          in: query
+          required: false
+          type: string
+        - name: bodyText
+          in: query
+          required: false
+          type: string
+        - name: sendEmail
+          in: query
+          required: false
+          type: boolean
+        - name: receiptBundleFormat
+          in: query
+          required: false
+          type: string
+        - name: sharepointFileUrls
+          in: query
+          required: false
+          type: string
+        - name: receiptUploadId
+          in: query
+          required: false
+          type: string
+        - name: purgeSharepointReceipts
+          in: query
+          required: false
+          type: boolean
+        - name: allowMissingReceipts
+          in: query
+          required: false
+          type: boolean
+        - name: draftItemsJson
+          in: body
+          required: false
+          schema:
+            type: string
+          description: JSON array string of draft items (the cart).
+      responses:
+        '200':
+          description: OK
+          schema:
+            $ref: '#/definitions/SubmitReportResponse'
+        '400':
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+
+definitions:
+  HealthResponse:
+    type: object
+    properties:
+      ok:
+        type: boolean
+    required:
+      - ok
+
+  ExpenseCodeMatch:
+    type: object
+    properties:
+      accountCode:
+        type: string
+      description:
+        type: string
+    required:
+      - accountCode
+      - description
+
+  ExpenseCodesResponse:
+    type: object
+    properties:
+      departmentCode:
+        type: string
+      activityCode:
+        type: string
+      matches:
+        type: array
+        items:
+          $ref: '#/definitions/ExpenseCodeMatch'
+    required:
+      - departmentCode
+      - activityCode
+      - matches
+
+  DepartmentCandidate:
+    type: object
+    properties:
+      departmentCode:
+        type: string
+      departmentName:
+        type: string
+    required:
+      - departmentCode
+      - departmentName
+
+  OrgChartLookupResponse:
+    type: object
+    properties:
+      ok:
+        type: boolean
+      found:
+        type: boolean
+      email:
+        type: string
+      displayName:
+        type: string
+      jobTitle:
+        type: string
+      departmentName:
+        type: string
+      departmentCode:
+        type: string
+      departmentNameMapped:
+        type: string
+      departmentMatchType:
+        type: string
+      departmentCandidates:
+        type: array
+        items:
+          $ref: '#/definitions/DepartmentCandidate'
+      error:
+        type: string
+    required:
+      - ok
+
+  PerDiemLookupResponse:
+    type: object
+    properties:
+      ok:
+        type: boolean
+      zipCode:
+        type: string
+      travelDate:
+        type: string
+      mieRate:
+        type: number
+      error:
+        type: string
+    required:
+      - ok
+
+  ErrorResponse:
+    type: object
+    properties:
+      error:
+        type: string
+
+  SubmitReportRequest:
+    type: object
+    properties:
+      toEmail:
+        type: string
+      fromUser:
+        type: string
+      requesterEmail:
+        type: string
+        description: If set and ccRequester=true, requester is CC'd for confirmation.
+      ccRequester:
+        type: boolean
+        description: If true, CC requesterEmail for confirmation (default true when requesterEmail is provided).
+      subject:
+        type: string
+      bodyText:
+        type: string
+      sendEmail:
+        type: boolean
+      receiptBundleFormat:
+        type: string
+        description: Optional receipt bundling format (e.g. pdf).
+      sharepointFileUrls:
+        type: string
+        description: Optional comma-separated SharePoint file URLs to include as receipts.
+      receiptUploadId:
+        type: string
+        description: Optional receipt-upload id from `/api/receipt-upload` flow.
+      purgeSharepointReceipts:
+        type: boolean
+        description: If true, attempts to delete receipt files after sending.
+      allowMissingReceipts:
+        type: boolean
+        description: If true, sends even when receipts are missing.
+      division:
+        type: string
+        example: '0000'
+      vendor:
+        type: string
+        example: CORE
+      attachments:
+        type: array
+        items:
+          type: object
+          properties:
+            name:
+              type: string
+            contentType:
+              type: string
+            contentBytes:
+              type: string
+              description: "Base64 bytes (optionally data: URI)."
+          required:
+            - name
+            - contentBytes
+      zipReceipts:
+        type: boolean
+        description: If true (default), multiple attachments are zipped into receipts.zip.
+      receiptZipName:
+        type: string
+        description: Zip filename (default receipts.zip).
+      requester:
+        type: object
+        properties:
+          organizationName:
+            type: string
+          firstName:
+            type: string
+          lastName:
+            type: string
+        additionalProperties: true
+      items:
+        type: array
+        items:
+          type: object
+          additionalProperties: true
+      draftItemsJson:
+        type: string
+    additionalProperties: true
+
+  ImportCsvRequest:
+    type: object
+    properties:
+      division:
+        type: string
+        example: '0000'
+      vendor:
+        type: string
+        example: CORE
+      requester:
+        type: object
+        properties:
+          organizationName:
+            type: string
+          firstName:
+            type: string
+          lastName:
+            type: string
+        additionalProperties: true
+      items:
+        type: array
+        items:
+          type: object
+          additionalProperties: true
+      draftItemsJson:
+        type: string
+    additionalProperties: true
+
+  SubmitReportResponse:
+    type: object
+    properties:
+      ok:
+        type: boolean
+      sent:
+        type: boolean
+      toEmail:
+        type: string
+      ccEmails:
+        type: array
+        items:
+          type: string
+      lineCount:
+        type: integer
+      amountTotal:
+        type: number
+      csvFilename:
+        type: string
+      emailError:
+        type: string
+      attachmentCount:
+        type: integer
+      attachmentsZipped:
+        type: boolean
+    required:
+      - ok
+      - sent
+      - toEmail
+      - lineCount
+      - amountTotal
+      - csvFilename

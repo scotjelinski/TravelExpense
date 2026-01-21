@@ -1,0 +1,361 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Add a mileage line item to the current travel-expense draft.
+  Computes amount as miles * Global.MileageRate (defaults to 0.70).
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  intent: {}
+  displayName: Main
+  actions:
+    - kind: SetVariable
+      id: setVariable_InitMileageRate
+      displayName: Init Mileage Rate
+      variable: Global.MileageRate
+      value: =If(IsBlank(Global.MileageRate), 0.70, Global.MileageRate)
+
+    - kind: BeginDialog
+      id: beginDialog_InitContext
+      displayName: Init Context
+      input: {}
+      dialog: new_agent.topic.9InitContext
+      output: {}
+
+    - kind: ConditionGroup
+      id: conditionGroup_RequireDept
+      displayName: Require Dept
+      conditions:
+        - id: conditionItem_NoDept
+          condition: =Len(Trim(Coalesce(Global.DepartmentCode, ""))) = 0
+          displayName: No Dept
+          actions:
+            - kind: SetVariable
+              id: setVariable_DepartmentCodeInput_Init
+              displayName: Department Code Input Init
+              variable: Topic.DepartmentCodeInput
+              value: =""
+
+            - kind: Question
+              id: question_DepartmentCode
+              displayName: Department Code
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.DepartmentCodeInput
+              entity: StringPrebuiltEntity
+              prompt: "What's the 3-digit department code for this expense? (example: 620)"
+
+            - kind: SetVariable
+              id: setVariable_SetGlobalDepartmentCode
+              displayName: Set Global Department Code
+              variable: Global.DepartmentCode
+              value: =Coalesce(Match(Trim(Coalesce(Topic.DepartmentCodeInput, "")), "[0-9]{3}").FullMatch, "")
+
+            - kind: ConditionGroup
+              id: conditionGroup_ValidateDepartmentCode
+              displayName: Validate Department Code
+              conditions:
+                - id: conditionItem_DepartmentInvalid
+                  displayName: Department Invalid
+                  condition: =!IsMatch(Global.DepartmentCode, "^[0-9]{3}$")
+                  actions:
+                    - kind: SetVariable
+                      id: setVariable_DepartmentCodeInput_Clear
+                      displayName: Department Code Input Clear
+                      variable: Topic.DepartmentCodeInput
+                      value: =""
+
+                    - kind: Question
+                      id: question_DepartmentCodeRetry
+                      displayName: Department Code (Retry)
+                      interruptionPolicy:
+                        allowInterruption: false
+                      variable: Topic.DepartmentCodeInput
+                      entity: StringPrebuiltEntity
+                      prompt: "Department code must be 3 digits (example: 620). What's the department code?"
+
+                    - kind: SetVariable
+                      id: setVariable_SetGlobalDepartmentCodeRetry
+                      displayName: Set Global Department Code (Retry)
+                      variable: Global.DepartmentCode
+                      value: =Coalesce(Match(Trim(Coalesce(Topic.DepartmentCodeInput, "")), "[0-9]{3}").FullMatch, "")
+
+    - kind: Question
+      id: question_Miles
+      displayName: Miles
+      interruptionPolicy:
+        allowInterruption: false
+
+      variable: Topic.Miles
+      prompt: How many miles did you drive (round-trip)?
+      entity: NumberPrebuiltEntity
+
+    - kind: SetVariable
+      id: setVariable_Description
+      displayName: Description
+      variable: Topic.Description
+      value: ="Mileage"
+
+    - kind: SetVariable
+      id: setVariable_ActivityCode
+      displayName: Activity Code
+      variable: Topic.ActivityCode
+      value: =If(Find("wellness", Lower(Trim(Coalesce(System.Activity.Text, "")))) > 0, "790", If(Find("train", Lower(Trim(Coalesce(System.Activity.Text, "")))) > 0 || Find("conference", Lower(Trim(Coalesce(System.Activity.Text, "")))) > 0 || Find("cert", Lower(Trim(Coalesce(System.Activity.Text, "")))) > 0 || Find("education", Lower(Trim(Coalesce(System.Activity.Text, "")))) > 0, "770", If(Find("meal", Lower(Trim(Coalesce(System.Activity.Text, "")))) > 0 || Find("cater", Lower(Trim(Coalesce(System.Activity.Text, "")))) > 0, "710", "700")))
+
+    - kind: SetVariable
+      id: setVariable_GlOverride
+      displayName: GL Override
+      variable: Topic.GlOverride
+      value: =If(Global.IsCapital = true || !IsBlank(Global.WorkOrder), "107200", "")
+
+    - kind: SetVariable
+      id: setVariable_Amount
+      displayName: Amount
+      variable: Topic.Amount
+      value: =Value(Topic.Miles) * Value(Global.MileageRate)
+
+    - kind: SetVariable
+      id: setVariable_Reference
+      displayName: Reference
+      variable: Topic.Reference
+      value: =Left(Trim(Concatenate("Mileage ", Text(Value(Topic.Miles), "0.0"), " mi")), 40)
+
+    - kind: BeginDialog
+      id: beginDialog_GetExpenseCodes
+      displayName: Get Expense Codes
+      input:
+        binding:
+          activityCode: =Topic.ActivityCode
+          departmentCode: =Global.DepartmentCode
+
+      dialog: new_agent.action.TravelExpense-ExpenseCodesLookup
+      output:
+        binding:
+          matches: Topic.ExpenseCodesMatches
+
+    - kind: ConditionGroup
+      id: conditionGroup_NoMatches
+      displayName: No Matches
+      conditions:
+        - id: conditionItem_NoMatches
+          condition: =CountRows(Topic.ExpenseCodesMatches) = 0
+          displayName: No Matches
+          actions:
+            - kind: SendActivity
+              id: sendActivity_NoMatches
+              displayName: No Matches
+              activity: I couldn't find a valid account code for this mileage under the default travel category.
+
+            - kind: Question
+              id: question_ActivityFallback
+              displayName: Activity Fallback
+              interruptionPolicy:
+                allowInterruption: false
+
+              variable: Topic.ActivityChoice
+              prompt: "Which best fits this trip: general travel, meals/events, training, or wellness?"
+              entity: StringPrebuiltEntity
+
+            - kind: SetVariable
+              id: setVariable_ActivityChoiceNorm
+              displayName: Activity Choice Norm
+              variable: Topic.ActivityChoiceNorm
+              value: =Lower(Trim(Topic.ActivityChoice))
+
+            - kind: SetVariable
+              id: setVariable_ActivityCodeFromChoice
+              displayName: Activity Code From Choice
+              variable: Topic.ActivityCode
+              value: =If(Topic.ActivityChoiceNorm = "710" || Find("meal", Topic.ActivityChoiceNorm) > 0 || Find("event", Topic.ActivityChoiceNorm) > 0, "710", If(Topic.ActivityChoiceNorm = "770" || Find("train", Topic.ActivityChoiceNorm) > 0 || Find("conf", Topic.ActivityChoiceNorm) > 0 || Find("cert", Topic.ActivityChoiceNorm) > 0 || Find("educat", Topic.ActivityChoiceNorm) > 0, "770", If(Topic.ActivityChoiceNorm = "790" || Find("wellness", Topic.ActivityChoiceNorm) > 0, "790", "700")))
+
+            - kind: BeginDialog
+              id: beginDialog_GetExpenseCodes_RetryActivity
+              displayName: Get Expense Codes (Retry Activity)
+              input:
+                binding:
+                  activityCode: =Topic.ActivityCode
+                  departmentCode: =Global.DepartmentCode
+
+              dialog: new_agent.action.TravelExpense-ExpenseCodesLookup
+              output:
+                binding:
+                  matches: Topic.ExpenseCodesMatches
+
+            - kind: ConditionGroup
+              id: conditionGroup_StillNoMatchesAfterActivity
+              displayName: Still No Matches After Activity
+              conditions:
+                - id: conditionItem_StillNoMatchesAfterActivity
+                  condition: =CountRows(Topic.ExpenseCodesMatches) = 0
+                  displayName: Still No Matches After Activity
+                  actions:
+                    - kind: SendActivity
+                      id: sendActivity_NoMatchesAfterActivity
+                      displayName: No Matches After Activity
+                      activity: No valid account codes found for Dept {Global.DepartmentCode}. Try "change department".
+
+                    - kind: EndDialog
+                      id: endDialog_NoMatches
+                      displayName: No Matches
+
+    - kind: ConditionGroup
+      id: conditionGroup_SelectAccount
+      displayName: Select Account
+      conditions:
+        - id: conditionItem_SingleMatch
+          condition: =CountRows(Topic.ExpenseCodesMatches) = 1
+          displayName: Single Match
+          actions:
+            - kind: SetVariable
+              id: setVariable_SelectedAccount_Single
+              displayName: Selected Account Single
+              variable: Topic.SelectedAccountCode
+              value: =First(Topic.ExpenseCodesMatches).accountCode
+
+      elseActions:
+        - kind: SetVariable
+          id: setVariable_MatchesText
+          displayName: Matches Text
+          variable: Topic.MatchesText
+          value: =Concat(Topic.ExpenseCodesMatches, ThisRecord.accountCode & If(IsBlank(ThisRecord.description), "", " - " & ThisRecord.description) & Char(10))
+
+        - kind: SendActivity
+          id: sendActivity_MultipleMatches
+          displayName: Multiple Matches
+          activity: |-
+            I found multiple valid account codes. Type the account code you want to use:
+
+            {Topic.MatchesText}
+
+        - kind: Question
+          id: question_SelectedAccount
+          displayName: Selected Account
+          interruptionPolicy:
+            allowInterruption: false
+
+          variable: Topic.SelectedAccountCode
+          prompt: Account code?
+          entity: StringPrebuiltEntity
+
+        - kind: SetVariable
+          id: setVariable_NormalizeSelectedAccount
+          displayName: Normalize Selected Account
+          variable: Topic.SelectedAccountCode
+          value: =Trim(Topic.SelectedAccountCode)
+
+        - kind: ConditionGroup
+          id: conditionGroup_InvalidAccountSelection
+          displayName: Invalid Account Selection
+          conditions:
+            - id: conditionItem_InvalidAccountSelection
+              condition: =CountRows(Filter(Topic.ExpenseCodesMatches, ThisRecord.accountCode = Topic.SelectedAccountCode)) = 0
+              displayName: Invalid Account Selection
+              actions:
+                - kind: SendActivity
+                  id: sendActivity_InvalidAccountSelection
+                  displayName: Invalid Account Selection
+                  activity: That account code isn't in the valid list. Please run "add mileage" again and select a code from the list.
+
+                - kind: EndDialog
+                  id: endDialog_InvalidAccountSelection
+                  displayName: Invalid Account Selection
+
+    - kind: SetVariable
+      id: setVariable_RateText
+      displayName: Rate Text
+      variable: Topic.RateText
+      value: =Concatenate("$", Text(Global.MileageRate, "0.00"))
+
+    - kind: SetVariable
+      id: setVariable_AmountText
+      displayName: Amount Text
+      variable: Topic.AmountText
+      value: =Concatenate("$", Text(Value(Topic.Amount), "0.00"))
+
+    - kind: SendActivity
+      id: sendActivity_Summary
+      displayName: Summary
+      activity: |-
+        Proposed mileage:
+        - Dept: {Global.DepartmentCode}
+        - Activity: {Topic.ActivityCode}
+        - Account: {Topic.SelectedAccountCode}
+        - GL override: {Topic.GlOverride}
+        - Miles: {Topic.Miles}
+        - Rate: {Topic.RateText}
+        - Amount: {Topic.AmountText}
+
+    - kind: Question
+      id: question_ApproveAdd
+      displayName: Approve Add
+      interruptionPolicy:
+        allowInterruption: false
+
+      variable: Topic.ApproveAdd
+      prompt: Approve and add this to the draft? (yes/no)
+      entity: BooleanPrebuiltEntity
+
+    - kind: ConditionGroup
+      id: conditionGroup_AddToDraft
+      displayName: Add To Draft
+      conditions:
+        - id: conditionItem_AddToDraft
+          condition: =Topic.ApproveAdd = true
+          displayName: Add To Draft
+          actions:
+            - kind: SetVariable
+              id: setVariable_ReferenceSafe
+              displayName: Reference Safe
+              variable: Topic.ReferenceSafe
+              value: =Substitute(Substitute(Substitute(Topic.Reference, Char(34), "'"), Char(10), " "), Char(13), " ")
+
+            - kind: SetVariable
+              id: setVariable_NewItemJson
+              displayName: New Item JSON
+              variable: Topic.NewItemJson
+              value: =Concatenate("{", Char(34), "mode", Char(34), ":", Char(34), "Mileage", Char(34), ",", Char(34), "departmentCode", Char(34), ":", Char(34), Global.DepartmentCode, Char(34), ",", Char(34), "activityCode", Char(34), ":", Char(34), Topic.ActivityCode, Char(34), ",", Char(34), "accountCode", Char(34), ":", Char(34), Topic.SelectedAccountCode, Char(34), ",", Char(34), "glAccountOverride", Char(34), ":", Char(34), Topic.GlOverride, Char(34), ",", Char(34), "reference", Char(34), ":", Char(34), Topic.ReferenceSafe, Char(34), ",", Char(34), "amountTotal", Char(34), ":", Text(Value(Topic.Amount), "0.00"), "}")
+
+            - kind: SetVariable
+              id: setVariable_AppendDraftItemsJson
+              displayName: Append Draft Items JSON
+              variable: Global.DraftItemsJson
+              value: =If(IsBlank(Global.DraftItemsJson) || Global.DraftItemsJson = "[]", Concatenate("[", Topic.NewItemJson, "]"), Concatenate(Left(Global.DraftItemsJson, Len(Global.DraftItemsJson) - 1), ",", Topic.NewItemJson, "]"))
+
+            - kind: SetVariable
+              id: setVariable_IncDraftItemCount
+              displayName: Inc Draft Item Count
+              variable: Global.DraftItemCount
+              value: =If(IsBlank(Global.DraftItemCount), 0, Global.DraftItemCount) + 1
+
+            - kind: SetVariable
+              id: setVariable_AddMileageTotal
+              displayName: Add Mileage Total
+              variable: Global.TotalMileageAmount
+              value: =If(IsBlank(Global.TotalMileageAmount), 0, Global.TotalMileageAmount) + Topic.Amount
+
+            - kind: SetVariable
+              id: setVariable_AppendDraftSummaryText
+              displayName: Append Draft Summary Text
+              variable: Global.DraftSummaryText
+              value: "=Concatenate(If(IsBlank(Global.DraftSummaryText), \"\", Global.DraftSummaryText & Char(10)), \"- Mileage: \", Topic.Reference, \" $\", Text(Value(Topic.Amount), \"0.00\"), \" (Dept \", Global.DepartmentCode, \", Act \", Topic.ActivityCode, \", Acct \", Topic.SelectedAccountCode, If(!IsBlank(Topic.GlOverride), \", GLOverride \" & Topic.GlOverride, \"\"), \")\")"
+
+            - kind: SendActivity
+              id: sendActivity_Added
+              displayName: Added
+              activity: Added. Say "add receipt", "add per diem", "add mileage", "review draft", or "submit".
+
+            - kind: EndDialog
+              id: endDialog_Added
+              displayName: Added
+
+      elseActions:
+        - kind: SendActivity
+          id: sendActivity_NotAdded
+          displayName: Not Added
+          activity: Okay — not added. Say "add mileage" when you're ready.
+
+        - kind: EndDialog
+          id: endDialog_NotAdded
+          displayName: Not Added
+
+inputType: {}
+outputType: {}

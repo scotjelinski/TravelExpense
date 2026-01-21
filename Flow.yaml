@@ -1,0 +1,1462 @@
+kind: workflow
+trigger:
+  kind: OnConversationStart
+  id: trigger_wf
+  actions:
+    - kind: SetVariable
+      id: init_latest
+      variable: Local.LatestMessage
+      value: =UserMessage(System.LastMessageText)
+
+    - kind: SetVariable
+      id: init_initial_text
+      variable: Local.InitialText
+      value: =Coalesce(System.LastMessageText,"")
+
+    - kind: SetVariable
+      id: init_attachment_cache
+      variable: Local.AttachmentCache
+      value: =If(IsEmpty(System.LastMessageAttachments), "", JSON(System.LastMessageAttachments))
+
+    # ----------------------------
+    # PREFILL: REQUESTER EMAIL (best-effort)
+    # - Prefer the authenticated user (System.User.Email)
+    # - Otherwise, if the first user message starts with an email (common pattern),
+    #   use that so we don't immediately re-ask for email.
+    # ----------------------------
+    - kind: SetVariable
+      id: init_email_token_from_text
+      variable: Local.InitialEmailToken
+      value: =If(CountRows(Filter(Split(Substitute(Substitute(Coalesce(Local.InitialText,""), Char(10), " "), Char(13), " "), " "), !IsBlank(Find("@", ThisRecord.Value)))) > 0, First(Filter(Split(Substitute(Substitute(Coalesce(Local.InitialText,""), Char(10), " "), Char(13), " "), " "), !IsBlank(Find("@", ThisRecord.Value)))).Value, "")
+
+    - kind: SetVariable
+      id: init_email_candidate_from_initial
+      variable: Local.InitialEmailCandidate
+      value: =If(!IsBlank(Coalesce(Local.InitialEmailToken,"")), Coalesce(Local.InitialEmailToken,""), If(IsBlank(Coalesce(Local.InitialText,"")), "", If(IsBlank(Find(" ", Coalesce(Local.InitialText,""))), Coalesce(Local.InitialText,""), Mid(Coalesce(Local.InitialText,""), 1, Find(" ", Coalesce(Local.InitialText,"")) - 1))))
+
+    - kind: SetVariable
+      id: init_email_candidate_clean
+      variable: Local.InitialEmailCandidateClean
+      value: =Trim(Substitute(Substitute(Substitute(Coalesce(Local.InitialEmailCandidate,""), ",", ""), ";", ""), ")", ""))
+
+    - kind: SetVariable
+      id: prefill_requester_email_from_system
+      variable: Local.RequesterEmail
+      value: =If(!IsBlank(Coalesce(System.User.Email,"")), Coalesce(System.User.Email,""), If(!IsBlank(Find("@", Coalesce(Local.InitialEmailCandidateClean,""))) && !IsBlank(Find("@CORE.COOP", Upper(Coalesce(Local.InitialEmailCandidateClean,"")))), Coalesce(Local.InitialEmailCandidateClean,""), ""))
+
+    # ----------------------------
+    # PREFILL: LOOKUP DEPARTMENT FROM ORGCHART (REQUESTER)
+    # ----------------------------
+    - kind: Question
+      id: ask_requester_email
+      variable: Local.RequesterEmail
+      entity: StringPrebuiltEntity
+      skipQuestionMode: SkipOnFirstExecutionIfVariableHasValue
+      prompt: "What is your CORE email address? (Used to prefill your department.)"
+
+    - kind: SetVariable
+      id: build_lookup_dept_agent_input
+      variable: Local.LookupDeptAgentInput
+      value: |-
+        =UserMessage(
+          "MODE=LookupDepartment; " &
+          "RequesterEmail=" & Coalesce(Local.RequesterEmail,"")
+        )
+
+    - kind: InvokeAzureAgent
+      id: invoke_lookup_dept
+      agent:
+        name: Travel-Expense-Bot
+      conversationId: =System.ConversationId
+      input:
+        messages: =Local.LookupDeptAgentInput
+      output:
+        messages: Local.LookupDeptMessage
+        autoSend: false
+
+    - kind: ConditionGroup
+      id: lookup_dept_postprocess
+      conditions:
+        - id: lookup_dept_needs_info
+          condition: =!IsBlank(Find("[NEEDS_INFO]", Upper(Last(Local.LookupDeptMessage).Text)))
+          actions:
+            - kind: SetVariable
+              id: capture_lookup_dept_prompt
+              variable: Local.NeedsInfoPrompt
+              value: =Last(Local.LookupDeptMessage).Text
+            - kind: SetVariable
+              id: clean_lookup_dept_prompt
+              variable: Local.NeedsInfoPromptClean
+              value: =Trim(Substitute(Substitute(Coalesce(Local.NeedsInfoPrompt,""), "[NEEDS_INFO]", ""), "[COMPLETED]", ""))
+            - kind: Question
+              id: lookup_dept_followup
+              variable: Local.RequesterEmail
+              entity: StringPrebuiltEntity
+              prompt: "{Local.NeedsInfoPromptClean}"
+            - kind: GotoAction
+              id: retry_lookup_dept
+              actionId: build_lookup_dept_agent_input
+
+        - id: lookup_dept_completed
+          condition: =!IsBlank(Find("[COMPLETED]", Upper(Last(Local.LookupDeptMessage).Text)))
+          actions:
+            - kind: SetVariable
+              id: extract_lookup_dept_json
+              variable: Local.LookupDeptJsonText
+              value: =Mid(Last(Local.LookupDeptMessage).Text, Find("{", Last(Local.LookupDeptMessage).Text), Len(Last(Local.LookupDeptMessage).Text) - Find("{", Last(Local.LookupDeptMessage).Text) + 1)
+            - kind: SetVariable
+              id: set_dept_from_lookup
+              variable: Local.DepartmentCode
+              value: =Coalesce(Text(ParseJSON(Local.LookupDeptJsonText).departmentCode), "")
+            - kind: SetVariable
+              id: set_dept_name_from_lookup
+              variable: Local.DepartmentNameNormalized
+              value: =Coalesce(Text(ParseJSON(Local.LookupDeptJsonText).departmentNameNormalized), "")
+
+    # ----------------------------
+    # ROUTE: INITIAL USER MESSAGE (optional shortcut)
+    # ----------------------------
+    - kind: ConditionGroup
+      id: initial_message_route
+      conditions:
+        - id: initial_combo_pd_and_mileage
+          condition: =(!IsBlank(Find("MILE", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find(" MI", Upper(" " & Coalesce(Local.InitialText,"") & " ")))) && (!IsBlank(Find("DIEM", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("DAY", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("NIGHT", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("HOTEL", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("STAY", Upper(Coalesce(Local.InitialText,"")))))
+          actions:
+            - kind: SetVariable
+              id: init_set_pending_auto_mileage
+              variable: Local.PendingAutoAddMileage
+              value: ="true"
+            - kind: SetVariable
+              id: init_set_pending_text
+              variable: Local.PendingAutoText
+              value: =Coalesce(Local.InitialText,"")
+            - kind: SetVariable
+              id: init_set_desc_pd_combo
+              variable: Local.Description
+              value: =Coalesce(Local.InitialText,"")
+            - kind: SetVariable
+              id: init_clear_pd_date
+              variable: Local.TravelDate
+              value: =""
+            - kind: SetVariable
+              id: init_set_qty_pd_3days
+              variable: Local.Quantity
+              value: =If(IsBlank(Coalesce(Local.Quantity,"")) && !IsBlank(Find("3 DAY", Upper(Coalesce(Local.InitialText,"")))), "3", Coalesce(Local.Quantity,""))
+            - kind: SetVariable
+              id: init_set_qty_pd_2days
+              variable: Local.Quantity
+              value: =If(IsBlank(Coalesce(Local.Quantity,"")) && !IsBlank(Find("2 DAY", Upper(Coalesce(Local.InitialText,"")))), "2", Coalesce(Local.Quantity,""))
+            - kind: SetVariable
+              id: init_set_qty_pd_2nights
+              variable: Local.Quantity
+              value: =If(IsBlank(Coalesce(Local.Quantity,"")) && !IsBlank(Find("2 NIGHT", Upper(Coalesce(Local.InitialText,"")))), "2", Coalesce(Local.Quantity,""))
+            - kind: SetVariable
+              id: init_set_activity_override_training_combo
+              variable: Local.ActivityCodeOverride
+              value: =If(!IsBlank(Find("TRAIN", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("EDUC", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("CONFERENCE", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("CLASS", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("SEMINAR", Upper(Coalesce(Local.InitialText,"")))), "770", "")
+            - kind: GotoAction
+              id: init_go_pd_combo
+              actionId: build_pd_agent_input
+
+        - id: initial_submit_receipt
+          condition: =(!IsBlank(Find("SUBMIT", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("REPORT", Upper(Coalesce(Local.InitialText,""))))) && (!IsBlank(Find("RECEIPT", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("RECIEPT", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("RECIPET", Upper(Coalesce(Local.InitialText,"")))))
+          actions:
+            - kind: SetVariable
+              id: initial_set_auto_submit_receipt
+              variable: Local.AutoSubmitAfterAdd
+              value: ="true"
+            - kind: GotoAction
+              id: initial_go_receipt_submit
+              actionId: receipt_start
+
+        - id: initial_submit
+          condition: =!IsBlank(Find("SUBMIT", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("REPORT", Upper(Coalesce(Local.InitialText,""))))
+          actions:
+            - kind: GotoAction
+              id: initial_go_submit
+              actionId: submit_start
+
+        - id: initial_mileage
+          condition: =!IsBlank(Find("MILE", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find(" MI", Upper(" " & Coalesce(Local.InitialText,"") & " ")))
+          actions:
+            - kind: SetVariable
+              id: initial_set_desc_mileage
+              variable: Local.Description
+              value: =If(IsBlank(Coalesce(Local.Description,"")), Coalesce(Local.InitialText,""), Local.Description)
+            - kind: SetVariable
+              id: initial_set_activity_override_training_mileage
+              variable: Local.ActivityCodeOverride
+              value: =If(!IsBlank(Find("TRAIN", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("EDUC", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("CONFERENCE", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("CLASS", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("SEMINAR", Upper(Coalesce(Local.InitialText,"")))), "770", Coalesce(Local.ActivityCodeOverride,""))
+            - kind: SetVariable
+              id: initial_clear_miles
+              variable: Local.Miles
+              value: =""
+            - kind: SetVariable
+              id: initial_clear_date_mileage
+              variable: Local.TravelDate
+              value: =""
+            - kind: GotoAction
+              id: initial_go_mileage
+              actionId: build_mileage_agent_input
+
+        - id: initial_per_diem
+          condition: =!IsBlank(Find("DIEM", Upper(Coalesce(Local.InitialText,"")))) || (!IsBlank(Find("DAY", Upper(Coalesce(Local.InitialText,"")))) && (!IsBlank(Find("VEGAS", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("TRIP", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("TRAVEL", Upper(Coalesce(Local.InitialText,""))))))
+          actions:
+            - kind: SetVariable
+              id: initial_set_desc_pd
+              variable: Local.Description
+              value: =If(IsBlank(Coalesce(Local.Description,"")), Coalesce(Local.InitialText,""), Local.Description)
+            - kind: SetVariable
+              id: initial_set_qty_pd_3days
+              variable: Local.Quantity
+              value: =If(IsBlank(Coalesce(Local.Quantity,"")) && !IsBlank(Find("3 DAY", Upper(Coalesce(Local.InitialText,"")))), "3", Coalesce(Local.Quantity,""))
+            - kind: SetVariable
+              id: initial_set_qty_pd_2days
+              variable: Local.Quantity
+              value: =If(IsBlank(Coalesce(Local.Quantity,"")) && !IsBlank(Find("2 DAY", Upper(Coalesce(Local.InitialText,"")))), "2", Coalesce(Local.Quantity,""))
+            - kind: SetVariable
+              id: initial_set_activity_override_training_pd
+              variable: Local.ActivityCodeOverride
+              value: =If(!IsBlank(Find("TRAIN", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("EDUC", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("CONFERENCE", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("CLASS", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("SEMINAR", Upper(Coalesce(Local.InitialText,"")))), "770", Coalesce(Local.ActivityCodeOverride,""))
+            - kind: GotoAction
+              id: initial_go_pd
+              actionId: build_pd_agent_input
+
+        - id: initial_receipt
+          condition: =!IsBlank(Find("RECEIPT", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("RECIEPT", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("RECIPET", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find(".PDF", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find(".JPG", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find(".JPEG", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find(".PNG", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("HOTEL", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("UBER", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("LYFT", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("PARK", Upper(Coalesce(Local.InitialText,""))))
+          actions:
+            - kind: SetVariable
+              id: initial_set_desc_receipt
+              variable: Local.Description
+              value: =If(IsBlank(Coalesce(Local.Description,"")), Coalesce(Local.InitialText,""), Local.Description)
+            - kind: SetVariable
+              id: initial_set_auto_submit_receipt_any
+              variable: Local.AutoSubmitAfterAdd
+              value: =If(!IsBlank(Find("SUBMIT", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find("SEND", Upper(Coalesce(Local.InitialText,"")))), "true", Coalesce(Local.AutoSubmitAfterAdd,""))
+            - kind: GotoAction
+              id: initial_go_receipt
+              actionId: receipt_start
+
+    - kind: Question
+      id: ask_mode
+      variable: Local.ExpenseMode
+      entity: StringPrebuiltEntity
+      prompt: "Tell me what you'd like to add (e.g., \"45 miles on 12/12/2025\" or \"2 nights in Vegas\"), or reply with: Receipt, Per Diem, Mileage, Review, Submit, Change Dept, Advanced, or Debug."
+
+    - kind: ConditionGroup
+      id: route
+      conditions:
+        - id: if_combo_pd_and_mileage
+          condition: =(!IsBlank(Find("MILE", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find(" MI", Upper(" " & Coalesce(Local.ExpenseMode,"") & " ")))) && (!IsBlank(Find("DIEM", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("DAY", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("NIGHT", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("HOTEL", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("STAY", Upper(Coalesce(Local.ExpenseMode,"")))))
+          actions:
+            - kind: SetVariable
+              id: mode_set_pending_auto_mileage
+              variable: Local.PendingAutoAddMileage
+              value: ="true"
+            - kind: SetVariable
+              id: mode_set_pending_text
+              variable: Local.PendingAutoText
+              value: =Coalesce(Local.ExpenseMode,"")
+            - kind: SetVariable
+              id: mode_set_desc_pd_combo
+              variable: Local.Description
+              value: =Coalesce(Local.ExpenseMode,"")
+            - kind: SetVariable
+              id: mode_clear_pd_date
+              variable: Local.TravelDate
+              value: =""
+            - kind: SetVariable
+              id: mode_set_qty_pd_3days
+              variable: Local.Quantity
+              value: =If(IsBlank(Coalesce(Local.Quantity,"")) && !IsBlank(Find("3 DAY", Upper(Coalesce(Local.ExpenseMode,"")))), "3", Coalesce(Local.Quantity,""))
+            - kind: SetVariable
+              id: mode_set_qty_pd_2days
+              variable: Local.Quantity
+              value: =If(IsBlank(Coalesce(Local.Quantity,"")) && !IsBlank(Find("2 DAY", Upper(Coalesce(Local.ExpenseMode,"")))), "2", Coalesce(Local.Quantity,""))
+            - kind: SetVariable
+              id: mode_set_qty_pd_2nights
+              variable: Local.Quantity
+              value: =If(IsBlank(Coalesce(Local.Quantity,"")) && !IsBlank(Find("2 NIGHT", Upper(Coalesce(Local.ExpenseMode,"")))), "2", Coalesce(Local.Quantity,""))
+            - kind: SetVariable
+              id: mode_set_activity_override_training_combo
+              variable: Local.ActivityCodeOverride
+              value: =If(!IsBlank(Find("TRAIN", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("EDUC", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("CONFERENCE", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("CLASS", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("SEMINAR", Upper(Coalesce(Local.ExpenseMode,"")))), "770", "")
+            - kind: GotoAction
+              id: mode_go_pd_combo
+              actionId: build_pd_agent_input
+
+        - id: if_submit_receipt
+          condition: =!IsBlank(Find("SUBMIT", Upper(Coalesce(Local.ExpenseMode,"")))) && (!IsBlank(Find("RECEIPT", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("RECIEPT", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("RECIPET", Upper(Coalesce(Local.ExpenseMode,"")))))
+          actions:
+            - kind: SetVariable
+              id: mode_set_auto_submit_receipt
+              variable: Local.AutoSubmitAfterAdd
+              value: ="true"
+            - kind: SetVariable
+              id: set_mode_receipt_from_submit
+              variable: Local.SelectedMode
+              value: ="Receipt"
+            - kind: GotoAction
+              id: go_receipt_from_submit
+              actionId: receipt_start
+
+        - id: if_receipt
+          condition: =!IsBlank(Find("RECEIPT", Upper(Local.ExpenseMode))) || !IsBlank(Find("RECIEPT", Upper(Local.ExpenseMode))) || !IsBlank(Find("RECIPET", Upper(Local.ExpenseMode))) || !IsBlank(Find(".PDF", Upper(Local.ExpenseMode))) || !IsBlank(Find(".JPG", Upper(Local.ExpenseMode))) || !IsBlank(Find(".JPEG", Upper(Local.ExpenseMode))) || !IsBlank(Find(".PNG", Upper(Local.ExpenseMode)))
+          actions:
+            - kind: SetVariable
+              id: set_mode_receipt
+              variable: Local.SelectedMode
+              value: ="Receipt"
+            - kind: GotoAction
+              id: go_receipt
+              actionId: receipt_start
+
+        - id: if_perdiem
+          condition: =!IsBlank(Find("PER", Upper(Local.ExpenseMode))) || !IsBlank(Find("DIEM", Upper(Local.ExpenseMode))) || !IsBlank(Find("NIGHT", Upper(Local.ExpenseMode))) || !IsBlank(Find("HOTEL", Upper(Local.ExpenseMode))) || !IsBlank(Find("STAY", Upper(Local.ExpenseMode)))
+          actions:
+            - kind: SetVariable
+              id: set_mode_perdiem
+              variable: Local.SelectedMode
+              value: ="Per Diem"
+            - kind: SetVariable
+              id: set_pd_desc_from_mode_text
+              variable: Local.Description
+              value: =If(IsBlank(Coalesce(Local.Description,"")), Coalesce(Local.ExpenseMode,""), Local.Description)
+            - kind: SetVariable
+              id: infer_pd_qty_2_nights
+              variable: Local.Quantity
+              value: =If(IsBlank(Coalesce(Local.Quantity,"")) && !IsBlank(Find("2 NIGHT", Upper(Coalesce(Local.ExpenseMode,"")))), "2", Coalesce(Local.Quantity,""))
+            - kind: SetVariable
+              id: infer_pd_qty_3_days
+              variable: Local.Quantity
+              value: =If(IsBlank(Coalesce(Local.Quantity,"")) && !IsBlank(Find("3 DAY", Upper(Coalesce(Local.ExpenseMode,"")))), "3", Coalesce(Local.Quantity,""))
+            - kind: SetVariable
+              id: set_pd_activity_override_training
+              variable: Local.ActivityCodeOverride
+              value: =If(!IsBlank(Find("TRAIN", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("EDUC", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("CONFERENCE", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("CLASS", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("SEMINAR", Upper(Coalesce(Local.ExpenseMode,"")))), "770", Coalesce(Local.ActivityCodeOverride,""))
+            - kind: GotoAction
+              id: go_perdiem
+              actionId: build_pd_agent_input
+
+        - id: if_mileage
+          condition: =!IsBlank(Find("MILE", Upper(Local.ExpenseMode))) || !IsBlank(Find(" MI", Upper(" " & Coalesce(Local.ExpenseMode,"") & " ")))
+          actions:
+            - kind: SetVariable
+              id: set_mode_mileage
+              variable: Local.SelectedMode
+              value: ="Mileage"
+            - kind: SetVariable
+              id: set_mileage_desc_from_mode_text
+              variable: Local.Description
+              value: =If(IsBlank(Coalesce(Local.Description,"")), Coalesce(Local.ExpenseMode,""), Local.Description)
+            - kind: SetVariable
+              id: clear_mileage_date_before_parse
+              variable: Local.TravelDate
+              value: =""
+            - kind: SetVariable
+              id: clear_mileage_miles_before_parse
+              variable: Local.Miles
+              value: =""
+            - kind: SetVariable
+              id: set_mileage_activity_override_training
+              variable: Local.ActivityCodeOverride
+              value: =If(!IsBlank(Find("TRAIN", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("EDUC", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("CONFERENCE", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("CLASS", Upper(Coalesce(Local.ExpenseMode,"")))) || !IsBlank(Find("SEMINAR", Upper(Coalesce(Local.ExpenseMode,"")))), "770", Coalesce(Local.ActivityCodeOverride,""))
+            - kind: GotoAction
+              id: go_mileage
+              actionId: build_mileage_agent_input
+
+        - id: if_review
+          condition: =!IsBlank(Find("REVIEW", Upper(Local.ExpenseMode)))
+          actions:
+            - kind: GotoAction
+              id: go_review
+              actionId: review_start
+
+        - id: if_submit
+          condition: =!IsBlank(Find("SUBMIT", Upper(Local.ExpenseMode)))
+          actions:
+            - kind: GotoAction
+              id: go_submit
+              actionId: submit_start
+        - id: if_change_dept
+          condition: =!IsBlank(Find("DEPT", Upper(Local.ExpenseMode)))
+          actions:
+            - kind: GotoAction
+              id: go_change_dept
+              actionId: change_dept_start
+        - id: if_debug
+          condition: =!IsBlank(Find("DEBUG", Upper(Coalesce(Local.ExpenseMode,""))))
+          actions:
+            - kind: GotoAction
+              id: go_debug
+              actionId: debug_start
+        - id: if_advanced
+          condition: =!IsBlank(Find("ADVANCED", Upper(Local.ExpenseMode)))
+          actions:
+            - kind: GotoAction
+              id: go_advanced
+              actionId: advanced_start
+      elseActions:
+        - kind: SendActivity
+          id: mode_help
+          activity: '="Please reply with: Receipt, Per Diem, Mileage, Review, Submit, Change Dept, Advanced, or Debug."'
+        - kind: GotoAction
+          id: retry_mode
+          actionId: ask_mode
+
+    # ----------------------------
+    # DEBUG (inspect attachment shape + conversationId)
+    # NOTE: Foundry Workflow preview chat often cannot accept file uploads,
+    # so System.LastMessageAttachments may be empty in preview even if it works
+    # in a real channel (Teams/Web/etc.).
+    # ----------------------------
+    - kind: SendActivity
+      id: debug_start
+      activity: '="DEBUG: First send the receipt PDFs as an attachment message WITH a short text (e.g., ''go''). Then send a second message: Debug. (Some channels fail with invalid_payload when attachments are sent as a reply to a workflow question.)"'
+
+    - kind: SendActivity
+      id: debug_dump
+      activity: |-
+        ="DEBUG INFO (shows the most recent message attachments)" & Char(10) &
+        "ConversationId: " & Coalesce(System.ConversationId,"") & Char(10) &
+        "System.User.Email: " & Coalesce(System.User.Email,"") & Char(10) &
+        "RequesterEmail: " & Coalesce(Local.RequesterEmail,"") & Char(10) &
+        "Dept: " & Coalesce(Local.DepartmentCode,"") & If(IsBlank(Coalesce(Local.DepartmentNameNormalized,"")), "", " - " & Local.DepartmentNameNormalized) & Char(10) &
+        "LastMessageAttachments empty? " & If(IsEmpty(System.LastMessageAttachments), "yes", "no") & Char(10) &
+        "AttachmentCache empty? " & If(IsBlank(Coalesce(Local.AttachmentCache,"")), "yes", "no") & Char(10) &
+        "LastMessageAttachments JSON:" & Char(10) &
+        Coalesce(If(IsEmpty(System.LastMessageAttachments), "", JSON(System.LastMessageAttachments)), "(empty)") & Char(10) &
+        "AttachmentCache JSON:" & Char(10) &
+        Coalesce(Coalesce(Local.AttachmentCache,""), "(empty)")
+
+    - kind: GotoAction
+      id: debug_back_to_menu
+      actionId: ask_mode
+
+    # ----------------------------
+    # CHANGE DEPARTMENT (optional override)
+    # ----------------------------
+    - kind: SendActivity
+      id: change_dept_start
+      activity: '="Current default department: " & Coalesce(Local.DepartmentCode,"(not set)") & If(IsBlank(Coalesce(Local.DepartmentNameNormalized,"")), "", " - " & Local.DepartmentNameNormalized) & ". Enter the department code you want to use for new items (3 digits), or reply ''cancel''."'
+
+    - kind: Question
+      id: change_dept_ask
+      variable: Local.ChangeDeptAnswer
+      entity: StringPrebuiltEntity
+      prompt: "Department code (3 digits), or 'cancel'."
+
+    - kind: ConditionGroup
+      id: change_dept_route
+      conditions:
+        - id: change_dept_cancel
+          condition: =!IsBlank(Find("CANCEL", Upper(Coalesce(Local.ChangeDeptAnswer,""))))
+          actions:
+            - kind: SendActivity
+              id: change_dept_cancelled_msg
+              activity: ="OK — keeping your current department."
+            - kind: GotoAction
+              id: change_dept_back_to_menu_cancel
+              actionId: ask_mode
+      elseActions:
+        - kind: SetVariable
+          id: change_dept_set
+          variable: Local.DepartmentCode
+          value: =Coalesce(Local.ChangeDeptAnswer,"")
+        - kind: SetVariable
+          id: change_dept_clear_name
+          variable: Local.DepartmentNameNormalized
+          value: =""
+        - kind: SendActivity
+          id: change_dept_set_msg
+          activity: '="OK — new items will use department " & Coalesce(Local.DepartmentCode,"") & "."'
+        - kind: GotoAction
+          id: change_dept_back_to_menu
+          actionId: ask_mode
+
+    # ----------------------------
+    # ADVANCED (work order / capital for next item)
+    # ----------------------------
+    - kind: SendActivity
+      id: advanced_start
+      activity: ="Advanced options apply to the NEXT item you add (then they reset)."
+
+    - kind: Question
+      id: advanced_work_order
+      variable: Local.WorkOrder
+      entity: StringPrebuiltEntity
+      prompt: "Work order for the next item? If none, reply 'none'."
+
+    - kind: Question
+      id: advanced_capital
+      variable: Local.IsCapital
+      entity: StringPrebuiltEntity
+      prompt: "Is the next item a capital expense? Reply yes/no."
+
+    - kind: SendActivity
+      id: advanced_confirm
+      activity: '="OK. Next item will use WorkOrder=" & If(!IsBlank(Find("NONE", Upper(Coalesce(Local.WorkOrder,"")))), "(none)", Coalesce(Local.WorkOrder,"(none)")) & ", Capital=" & If(!IsBlank(Find("YES", Upper(Coalesce(Local.IsCapital,"")))), "yes", "no") & "."'
+
+    - kind: GotoAction
+      id: advanced_back_to_menu
+      actionId: ask_mode
+
+    # ----------------------------
+    # REVIEW / SUBMIT PATHS (Phase 2 - draft cart)
+    # ----------------------------
+    - kind: SendActivity
+      id: review_start
+      activity: ="Reviewing your current draft..."
+
+    - kind: ConditionGroup
+      id: review_check
+      conditions:
+        - id: review_empty
+          condition: =IsBlank(Coalesce(Local.DraftItemCount,""))
+          actions:
+            - kind: SendActivity
+              id: review_empty_msg
+              activity: ="You don't have any draft items yet. Add a Receipt, Per Diem, or Mileage item first."
+            - kind: GotoAction
+              id: review_back_to_menu_empty
+              actionId: ask_mode
+      elseActions:
+        - kind: SendActivity
+          id: review_summary_msg
+          activity: '="Draft items: " & Coalesce(Local.DraftItemCount,"0") & If(IsBlank(Coalesce(Local.LastAddedReference,"")), "", " (last added: " & Local.LastAddedReference & ")")'
+        - kind: Question
+          id: review_next_action
+          variable: Local.ReviewAction
+          entity: StringPrebuiltEntity
+          prompt: "Reply with: Back (continue adding) or Clear (discard draft)."
+
+        - kind: ConditionGroup
+          id: review_route
+          conditions:
+            - id: review_clear
+              condition: =!IsBlank(Find("CLEAR", Upper(Coalesce(Local.ReviewAction,""))))
+              actions:
+                - kind: SetVariable
+                  id: clear_draft_items_json
+                  variable: Local.DraftItemsJson
+                  value: =""
+                - kind: SetVariable
+                  id: clear_draft_item_count
+                  variable: Local.DraftItemCount
+                  value: =""
+                - kind: SetVariable
+                  id: clear_last_added_reference
+                  variable: Local.LastAddedReference
+                  value: =""
+                - kind: SendActivity
+                  id: review_cleared_msg
+                  activity: ="Draft cleared."
+                - kind: GotoAction
+                  id: review_back_to_menu_after_clear
+                  actionId: ask_mode
+          elseActions:
+            - kind: GotoAction
+              id: review_back_to_menu
+              actionId: ask_mode
+
+    - kind: SendActivity
+      id: submit_start
+      activity: ="Checking your draft items to submit..."
+
+    - kind: ConditionGroup
+      id: submit_check
+      conditions:
+        - id: submit_empty
+          condition: =IsBlank(Coalesce(Local.DraftItemCount,""))
+          actions:
+            - kind: SendActivity
+              id: submit_empty_msg
+              activity: ="You don't have any draft items yet. Add a Receipt, Per Diem, or Mileage item first."
+            - kind: GotoAction
+              id: submit_back_to_menu_empty
+              actionId: ask_mode
+      elseActions:
+        - kind: SetVariable
+          id: submit_clear_receipt_ack
+          variable: Local.SubmitReceiptAck
+          value: =""
+        - kind: SetVariable
+          id: submit_clear_attachments
+          variable: Local.SubmitAttachmentsJson
+          value: =""
+
+        - kind: ConditionGroup
+          id: submit_receipt_attach_check
+          conditions:
+            - id: submit_has_receipts
+              condition: =!IsBlank(Find("RECEIPT", Upper(Coalesce(Local.DraftItemsJson,""))))
+              actions:
+                - kind: SetVariable
+                  id: submit_default_receipt_ack
+                  variable: Local.SubmitReceiptAck
+                  value: ="done"
+                - kind: ConditionGroup
+                  id: submit_receipt_attach_needed
+                  conditions:
+                    - id: submit_receipt_attach_skip_prompt
+                      condition: =!IsBlank(Coalesce(Local.AttachmentCache,""))
+                      actions:
+                        - kind: SetVariable
+                          id: submit_use_cached_attachments
+                          variable: Local.SubmitAttachmentsJson
+                          value: =Coalesce(Local.AttachmentCache,"")
+                        - kind: SetVariable
+                          id: submit_set_ack_cached
+                          variable: Local.SubmitReceiptAck
+                          value: ="done"
+                  elseActions:
+                    - kind: Question
+                      id: submit_receipt_attachments
+                      variable: Local.SubmitReceiptAck
+                      entity: StringPrebuiltEntity
+                      prompt: "Attach the receipt PDFs and type 'done' in the SAME message. Reply 'skip' to send without attachments."
+                    - kind: SetVariable
+                      id: submit_capture_attachments
+                      variable: Local.SubmitAttachmentsJson
+                      value: =If(IsEmpty(System.LastMessageAttachments), "", JSON(System.LastMessageAttachments))
+                    - kind: SetVariable
+                      id: submit_cache_attachments
+                      variable: Local.AttachmentCache
+                      value: =If(IsEmpty(System.LastMessageAttachments), Coalesce(Local.AttachmentCache,""), JSON(System.LastMessageAttachments))
+
+        - kind: ConditionGroup
+          id: submit_ack_interrupts
+          conditions:
+            - id: submit_ack_debug
+              condition: =!IsBlank(Find("DEBUG", Upper(Coalesce(Local.SubmitReceiptAck,""))))
+              actions:
+                - kind: GotoAction
+                  id: submit_ack_go_debug
+                  actionId: debug_start
+
+        - kind: SetVariable
+          id: build_submit_agent_input
+          variable: Local.SubmitAgentInput
+          value: |-
+            =UserMessage(
+              "MODE=SubmitTrip; " &
+              "ConversationId=" & Coalesce(System.ConversationId,"") & "; " &
+              "RequesterEmail=" & Coalesce(Local.RequesterEmail,"") & "; " &
+              "ReceiptAttachmentAck=" & Coalesce(Local.SubmitReceiptAck,"") & "; " &
+              "ReceiptAttachmentsJson=" & Coalesce(Local.SubmitAttachmentsJson, Local.AttachmentCache, "") & "; " &
+              "DraftItemsJson=" & Coalesce(Local.DraftItemsJson,"")
+            )
+
+        - kind: InvokeAzureAgent
+          id: invoke_submit
+          agent:
+            name: Travel-Expense-Bot
+          conversationId: =System.ConversationId
+          input:
+            messages: =Local.SubmitAgentInput
+          output:
+            messages: Local.SubmitMessage
+            autoSend: false
+
+        - kind: ConditionGroup
+          id: submit_postprocess
+          conditions:
+            - id: submit_needs_info
+              condition: =!IsBlank(Find("[NEEDS_INFO]", Upper(Last(Local.SubmitMessage).Text)))
+              actions:
+                - kind: SetVariable
+                  id: submit_capture_prompt
+                  variable: Local.NeedsInfoPrompt
+                  value: =Last(Local.SubmitMessage).Text
+                - kind: SetVariable
+                  id: submit_clean_prompt
+                  variable: Local.NeedsInfoPromptClean
+                  value: =Trim(Substitute(Substitute(Coalesce(Local.NeedsInfoPrompt,""), "[NEEDS_INFO]", ""), "[COMPLETED]", ""))
+                - kind: SendActivity
+                  id: submit_needs_info_msg
+                  activity: =Local.NeedsInfoPromptClean
+                - kind: GotoAction
+                  id: submit_back_to_menu_needs_info
+                  actionId: ask_mode
+
+            - id: submit_completed
+              condition: =!IsBlank(Find("[COMPLETED]", Upper(Last(Local.SubmitMessage).Text)))
+              actions:
+                - kind: SetVariable
+                  id: submit_extract_json
+                  variable: Local.SubmitJsonText
+                  value: =Mid(Last(Local.SubmitMessage).Text, Find("{", Last(Local.SubmitMessage).Text), Len(Last(Local.SubmitMessage).Text) - Find("{", Last(Local.SubmitMessage).Text) + 1)
+                - kind: SendActivity
+                  id: submit_success_msg
+                  activity: '="Submitted to itrenewal@core.coop and CC''d you (" & Coalesce(Local.RequesterEmail,"") & ") for confirmation. Total: $" & Coalesce(Text(ParseJSON(Local.SubmitJsonText).amountTotal), "0") & "."'
+                - kind: SetVariable
+                  id: submit_clear_draft_items_json
+                  variable: Local.DraftItemsJson
+                  value: =""
+                - kind: SetVariable
+                  id: submit_clear_draft_item_count
+                  variable: Local.DraftItemCount
+                  value: =""
+                - kind: SetVariable
+                  id: submit_clear_last_added_reference
+                  variable: Local.LastAddedReference
+                  value: =""
+                - kind: SetVariable
+                  id: submit_clear_receipt_ack_after
+                  variable: Local.SubmitReceiptAck
+                  value: =""
+                - kind: SetVariable
+                  id: submit_clear_attachments_after
+                  variable: Local.SubmitAttachmentsJson
+                  value: =""
+                - kind: SetVariable
+                  id: submit_clear_attachment_cache_after
+                  variable: Local.AttachmentCache
+                  value: =""
+                - kind: GotoAction
+                  id: submit_back_to_menu_success
+                  actionId: ask_mode
+          elseActions:
+            - kind: SendActivity
+              id: submit_unknown_msg
+              activity: ="I couldn't confirm submission status. Please retry Submit."
+            - kind: GotoAction
+              id: submit_back_to_menu_unknown
+              actionId: ask_mode
+
+    # ----------------------------
+    # RECEIPT PATH
+    # ----------------------------
+    - kind: SendActivity
+      id: receipt_start
+      activity: ="Got it. I'll read the receipts and draft the coding."
+
+    - kind: SetVariable
+      id: receipt_clear_date_start
+      variable: Local.TravelDate
+      value: =""
+
+    - kind: SetVariable
+      id: receipt_clear_amount_start
+      variable: Local.Amount
+      value: =""
+
+    - kind: SetVariable
+      id: receipt_clear_desc_start
+      variable: Local.Description
+      value: =""
+
+    - kind: ConditionGroup
+      id: receipt_attachment_prefill
+      conditions:
+        - id: receipt_has_cached_attachments
+          condition: =!IsBlank(Coalesce(Local.AttachmentCache,"")) || !IsBlank(Find(".PDF", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find(".JPG", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find(".JPEG", Upper(Coalesce(Local.InitialText,"")))) || !IsBlank(Find(".PNG", Upper(Coalesce(Local.InitialText,""))))
+          actions:
+            - kind: SetVariable
+              id: receipt_set_ack_cached
+              variable: Local.ReceiptUploadAck
+              value: ="look at receipts"
+      elseActions:
+        - kind: Question
+          id: ask_receipt_details
+          variable: Local.ReceiptUploadAck
+          entity: StringPrebuiltEntity
+          prompt: "Attach the receipt PDFs/photos now, then reply 'done'. If you already attached them, reply 'use attachments'. If you can't attach a file, paste the receipt details instead."
+
+    - kind: ConditionGroup
+      id: receipt_upload_ack_interrupts
+      conditions:
+        - id: receipt_upload_ack_debug
+          condition: =!IsBlank(Find("DEBUG", Upper(Coalesce(Local.ReceiptUploadAck,""))))
+          actions:
+            - kind: GotoAction
+              id: receipt_upload_ack_go_debug
+              actionId: debug_start
+
+    - kind: SetVariable
+      id: receipt_capture_attachments
+      variable: Local.AttachmentCache
+      value: =If(IsEmpty(System.LastMessageAttachments), Coalesce(Local.AttachmentCache,""), JSON(System.LastMessageAttachments))
+
+    - kind: SetVariable
+      id: normalize_receipt_details_from_ack
+      variable: Local.ReceiptDetails
+      value: =If(!IsBlank(Find("DONE", Upper(Coalesce(Local.ReceiptUploadAck,"")))) || !IsBlank(Find("LOOK", Upper(Coalesce(Local.ReceiptUploadAck,"")))) || !IsBlank(Find("SEE", Upper(Coalesce(Local.ReceiptUploadAck,"")))) || !IsBlank(Find("ATTACH", Upper(Coalesce(Local.ReceiptUploadAck,"")))), "", Coalesce(Local.ReceiptUploadAck,""))
+
+    - kind: SetVariable
+      id: receipt_auto_submit_from_ack
+      variable: Local.AutoSubmitAfterAdd
+      value: =If(!IsBlank(Find("SUBMIT", Upper(Coalesce(Local.ReceiptUploadAck,"")))) || !IsBlank(Find("SEND", Upper(Coalesce(Local.ReceiptUploadAck,"")))), "true", Coalesce(Local.AutoSubmitAfterAdd,""))
+
+    - kind: SetVariable
+      id: build_receipt_agent_input
+      variable: Local.AgentInput
+      value: |-
+        =UserMessage(
+          "MODE=Receipt; " &
+          "RequesterEmail=" & Coalesce(Local.RequesterEmail,"") & "; " &
+          "DepartmentCode=" & Coalesce(Local.DepartmentCode,"") & "; " &
+          "TravelDate=" & If(!IsBlank(Find("UNKNOWN", Upper(Coalesce(Local.TravelDate,"")))), "", Coalesce(Local.TravelDate,"")) & "; " &
+          "Amount=" & If(!IsBlank(Find("UNKNOWN", Upper(Coalesce(Local.Amount,"")))), "", Coalesce(Local.Amount,"")) & "; " &
+          "WorkOrder=" & If(!IsBlank(Find("NONE", Upper(Coalesce(Local.WorkOrder,"")))), "", Coalesce(Local.WorkOrder,"")) & "; " &
+          "IsCapital=" & Coalesce(Local.IsCapital,"") & "; " &
+          "Description=" & Coalesce(Local.Description,"") & "; " &
+          "ReceiptDetails=" & Coalesce(Local.ReceiptDetails,"") & "; " &
+          "ActivityCodeOverride=" & Coalesce(Local.ActivityCodeOverride,"") & "; " &
+          "AccountChoice=" & Coalesce(Local.AccountChoice,"")
+        )
+
+    - kind: InvokeAzureAgent
+      id: invoke_receipt_processor
+      agent:
+        name: Travel-Expense-Bot
+      conversationId: =System.ConversationId
+      input:
+        messages: =Local.AgentInput
+      output:
+        messages: Local.LatestMessage
+        autoSend: false
+
+    - kind: ConditionGroup
+      id: receipt_postprocess
+      conditions:
+        - id: receipt_needs_info
+          condition: =!IsBlank(Find("[NEEDS_INFO]", Upper(Last(Local.LatestMessage).Text)))
+          actions:
+            - kind: SetVariable
+              id: receipt_capture_prompt
+              variable: Local.NeedsInfoPrompt
+              value: =Last(Local.LatestMessage).Text
+            - kind: SetVariable
+              id: receipt_clean_prompt
+              variable: Local.NeedsInfoPromptClean
+              value: =Trim(Substitute(Substitute(Coalesce(Local.NeedsInfoPrompt,""), "[NEEDS_INFO]", ""), "[COMPLETED]", ""))
+            - kind: Question
+              id: receipt_followup
+              variable: Local.FollowupAnswer
+              entity: StringPrebuiltEntity
+              prompt: "{Local.NeedsInfoPromptClean}"
+
+            - kind: ConditionGroup
+              id: receipt_followup_route
+              conditions:
+                - id: receipt_followup_debug
+                  condition: =!IsBlank(Find("DEBUG", Upper(Coalesce(Local.FollowupAnswer,""))))
+                  actions:
+                    - kind: GotoAction
+                      id: receipt_followup_go_debug
+                      actionId: debug_start
+                - id: receipt_no_valid_accounts
+                  condition: =!IsBlank(Find("VALID ACCOUNTS", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: ConditionGroup
+                      id: receipt_no_accounts_route
+                      conditions:
+                        - id: receipt_no_accounts_pick_700
+                          condition: =!IsBlank(Find("700", Upper(Coalesce(Local.FollowupAnswer,"")))) || !IsBlank(Find("BUSINESS", Upper(Coalesce(Local.FollowupAnswer,""))))
+                          actions:
+                            - kind: SetVariable
+                              id: receipt_set_activity_override_700
+                              variable: Local.ActivityCodeOverride
+                              value: ="700"
+                            - kind: GotoAction
+                              id: receipt_retry_after_activity_override
+                              actionId: build_receipt_agent_input
+                      elseActions:
+                        - kind: SendActivity
+                          id: receipt_no_accounts_help
+                          activity: ="Please reply with 700 to file as Business Travel, or use Change Dept to pick a different department."
+                        - kind: GotoAction
+                          id: receipt_no_accounts_back
+                          actionId: ask_mode
+                - id: receipt_need_amount
+                  condition: =!IsBlank(Find("AMOUNT", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_amount_from_followup
+                      variable: Local.Amount
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_receipt_amount
+                      actionId: build_receipt_agent_input
+
+                - id: receipt_need_dept
+                  condition: =!IsBlank(Find("DEPARTMENT", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_dept_from_followup
+                      variable: Local.DepartmentCode
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_receipt_dept
+                      actionId: build_receipt_agent_input
+
+                - id: receipt_need_date
+                  condition: =!IsBlank(Find("DATE", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_date_from_followup
+                      variable: Local.TravelDate
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_receipt_date
+                      actionId: build_receipt_agent_input
+
+                - id: receipt_need_choice
+                  condition: =!IsBlank(Find("(A)", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_choice_from_followup
+                      variable: Local.AccountChoice
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_receipt_choice
+                      actionId: build_receipt_agent_input
+              elseActions:
+                - kind: SetVariable
+                  id: set_receipt_details_from_followup
+                  variable: Local.ReceiptDetails
+                  value: =Local.FollowupAnswer
+                - kind: GotoAction
+                  id: retry_receipt_default
+                  actionId: build_receipt_agent_input
+
+        - id: receipt_completed
+          condition: =!IsBlank(Find("[COMPLETED]", Upper(Last(Local.LatestMessage).Text)))
+          actions:
+            - kind: SetVariable
+              id: receipt_extract_json
+              variable: Local.LastExpenseJsonText
+              value: =Mid(Last(Local.LatestMessage).Text, Find("{", Last(Local.LatestMessage).Text), Len(Last(Local.LatestMessage).Text) - Find("{", Last(Local.LatestMessage).Text) + 1)
+            - kind: SetVariable
+              id: receipt_append_draft_json
+              variable: Local.DraftItemsJson
+              value: '=If(IsBlank(Coalesce(Local.DraftItemsJson,"")), "[" & Local.LastExpenseJsonText & "]", Mid(Local.DraftItemsJson, 1, Len(Local.DraftItemsJson)-1) & "," & Local.LastExpenseJsonText & "]")'
+            - kind: SetVariable
+              id: receipt_inc_draft_count
+              variable: Local.DraftItemCount
+              value: =If(IsBlank(Coalesce(Local.DraftItemCount,"")), "1", Text(Value(Local.DraftItemCount) + 1))
+            - kind: SetVariable
+              id: receipt_set_last_reference
+              variable: Local.LastAddedReference
+              value: =Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).reference), "")
+            - kind: SetVariable
+              id: receipt_clear_amount
+              variable: Local.Amount
+              value: =""
+            - kind: SetVariable
+              id: receipt_clear_date
+              variable: Local.TravelDate
+              value: =""
+            - kind: SetVariable
+              id: receipt_clear_work_order
+              variable: Local.WorkOrder
+              value: =""
+            - kind: SetVariable
+              id: receipt_clear_capital
+              variable: Local.IsCapital
+              value: =""
+            - kind: SetVariable
+              id: receipt_clear_desc
+              variable: Local.Description
+              value: =""
+            - kind: SetVariable
+              id: receipt_clear_details
+              variable: Local.ReceiptDetails
+              value: =""
+            - kind: SetVariable
+              id: receipt_clear_choice
+              variable: Local.AccountChoice
+              value: =""
+            - kind: SetVariable
+              id: receipt_clear_activity_override
+              variable: Local.ActivityCodeOverride
+              value: =""
+            - kind: ConditionGroup
+              id: receipt_post_add_route
+              conditions:
+                - id: receipt_auto_submit
+                  condition: =!IsBlank(Coalesce(Local.AutoSubmitAfterAdd,""))
+                  actions:
+                    - kind: SendActivity
+                      id: receipt_added_submit_msg
+                      activity: '="Added: " & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).reference), "item") & ". Submitting now."'
+                    - kind: SetVariable
+                      id: receipt_clear_auto_submit
+                      variable: Local.AutoSubmitAfterAdd
+                      value: =""
+                    - kind: GotoAction
+                      id: receipt_go_submit
+                      actionId: submit_start
+              elseActions:
+                - kind: SendActivity
+                  id: receipt_added_msg
+                  activity: '="Receipts: " & Coalesce(Concat(ParseJSON(Local.LastExpenseJsonText).lines, Coalesce(Text(ThisRecord.description), "") & " ($" & Text(ThisRecord.amount) & ")", "; "), "item") & ". Total $" & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).amountTotal), "0") & ". Coding: Dept " & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).departmentCode), "(unknown)") & " / Act " & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).activityCode), "(unknown)") & " / Acct " & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).accountCode), "(unknown)") & If(IsBlank(Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).glAccountOverride), "")), "", " (GL override " & Text(ParseJSON(Local.LastExpenseJsonText).glAccountOverride) & ")") & ". Reply Approve to submit or Change to modify."'
+                - kind: Question
+                  id: receipt_post_approve
+                  variable: Local.PostApproveAction
+                  entity: StringPrebuiltEntity
+                  prompt: "Approve to submit, or Change to modify."
+                - kind: ConditionGroup
+                  id: receipt_post_approve_route
+                  conditions:
+                    - id: receipt_post_approve_submit
+                      condition: =!IsBlank(Find("APPROVE", Upper(Coalesce(Local.PostApproveAction,"")))) || !IsBlank(Find("SUBMIT", Upper(Coalesce(Local.PostApproveAction,""))))
+                      actions:
+                        - kind: GotoAction
+                          id: receipt_post_go_submit
+                          actionId: submit_start
+                    - id: receipt_post_approve_change
+                      condition: =!IsBlank(Find("CHANGE", Upper(Coalesce(Local.PostApproveAction,"")))) || !IsBlank(Find("EDIT", Upper(Coalesce(Local.PostApproveAction,""))))
+                      actions:
+                        - kind: GotoAction
+                          id: receipt_post_go_change
+                          actionId: ask_mode
+                  elseActions:
+                    - kind: GotoAction
+                      id: receipt_post_go_menu
+                      actionId: ask_mode
+      elseActions:
+        - kind: EndConversation
+          id: end_receipt_fallback
+
+    # ----------------------------
+    # PER DIEM PATH
+    # ----------------------------
+    - kind: SendActivity
+      id: perdiem_start
+      activity: ="OK - per diem. I'll ask a few quick questions."
+
+    - kind: Question
+      id: ask_travel_date_pd
+      variable: Local.TravelDate
+      entity: StringPrebuiltEntity
+      skipQuestionMode: SkipOnFirstExecutionIfVariableHasValue
+      prompt: "Start date (e.g., 2025-12-12 or 12/12/2025)."
+
+    - kind: Question
+      id: ask_quantity_pd
+      variable: Local.Quantity
+      entity: StringPrebuiltEntity
+      skipQuestionMode: SkipOnFirstExecutionIfVariableHasValue
+      prompt: "How many days (Quantity)?"
+
+    - kind: Question
+      id: ask_zip_pd
+      variable: Local.ZipCode
+      entity: StringPrebuiltEntity
+      skipQuestionMode: SkipOnFirstExecutionIfVariableHasValue
+      prompt: "5-digit ZIP code for per diem locality (GSA requires ZIP). Example: 89109."
+
+    - kind: Question
+      id: ask_description_pd
+      variable: Local.Description
+      entity: StringPrebuiltEntity
+      skipQuestionMode: SkipOnFirstExecutionIfVariableHasValue
+      prompt: "Short description (what trip / why?)"
+
+    - kind: SetVariable
+      id: build_pd_agent_input
+      variable: Local.AgentInput
+      value: |-
+        =UserMessage(
+          "MODE=Per Diem; " &
+          "RequesterEmail=" & Coalesce(Local.RequesterEmail,"") & "; " &
+          "DepartmentCode=" & Coalesce(Local.DepartmentCode,"") & "; " &
+          "TravelDate=" & Coalesce(Local.TravelDate,"") & "; " &
+          "ZipCode=" & Coalesce(Local.ZipCode,"") & "; " &
+          "Quantity=" & Coalesce(Local.Quantity,"") & "; " &
+          "Travelers=" & Coalesce(Local.Travelers,"1") & "; " &
+          "WorkOrder=" & If(!IsBlank(Find("NONE", Upper(Coalesce(Local.WorkOrder,"")))), "", Coalesce(Local.WorkOrder,"")) & "; " &
+          "IsCapital=" & Coalesce(Local.IsCapital,"") & "; " &
+          "Description=" & Coalesce(Local.Description,"") & "; " &
+          "ActivityCodeOverride=" & Coalesce(Local.ActivityCodeOverride,"") & "; " &
+          "AccountChoice=" & Coalesce(Local.AccountChoice,"")
+        )
+
+    - kind: InvokeAzureAgent
+      id: invoke_perdiem_processor
+      agent:
+        name: Travel-Expense-Bot
+      conversationId: =System.ConversationId
+      input:
+        messages: =Local.AgentInput
+      output:
+        messages: Local.LatestMessage
+        autoSend: false
+
+    - kind: ConditionGroup
+      id: pd_postprocess
+      conditions:
+        - id: pd_needs_info
+          condition: =!IsBlank(Find("[NEEDS_INFO]", Upper(Last(Local.LatestMessage).Text)))
+          actions:
+            - kind: SetVariable
+              id: pd_capture_prompt
+              variable: Local.NeedsInfoPrompt
+              value: =Last(Local.LatestMessage).Text
+            - kind: SetVariable
+              id: pd_clean_prompt
+              variable: Local.NeedsInfoPromptClean
+              value: =Trim(Substitute(Substitute(Coalesce(Local.NeedsInfoPrompt,""), "[NEEDS_INFO]", ""), "[COMPLETED]", ""))
+            - kind: Question
+              id: pd_followup
+              variable: Local.FollowupAnswer
+              entity: StringPrebuiltEntity
+              prompt: "{Local.NeedsInfoPromptClean}"
+
+            - kind: ConditionGroup
+              id: pd_followup_route
+              conditions:
+                - id: pd_need_zip
+                  condition: =!IsBlank(Find("ZIP", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_zip_from_followup
+                      variable: Local.ZipCode
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_pd_zip
+                      actionId: build_pd_agent_input
+
+                - id: pd_need_qty
+                  condition: =!IsBlank(Find("QUANTITY", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_qty_from_followup
+                      variable: Local.Quantity
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_pd_qty
+                      actionId: build_pd_agent_input
+
+                - id: pd_need_dept
+                  condition: =!IsBlank(Find("DEPARTMENT", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_pd_dept_from_followup
+                      variable: Local.DepartmentCode
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_pd_dept
+                      actionId: build_pd_agent_input
+
+                - id: pd_need_date
+                  condition: =!IsBlank(Find("DATE", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_pd_date_from_followup
+                      variable: Local.TravelDate
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_pd_date
+                      actionId: build_pd_agent_input
+
+                - id: pd_need_choice
+                  condition: =!IsBlank(Find("(A)", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_pd_choice_from_followup
+                      variable: Local.AccountChoice
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_pd_choice
+                      actionId: build_pd_agent_input
+              elseActions:
+                - kind: SetVariable
+                  id: set_pd_desc_from_followup
+                  variable: Local.Description
+                  value: =Local.FollowupAnswer
+                - kind: GotoAction
+                  id: retry_pd_default
+                  actionId: build_pd_agent_input
+
+        - id: pd_completed
+          condition: =!IsBlank(Find("[COMPLETED]", Upper(Last(Local.LatestMessage).Text)))
+          actions:
+            - kind: SetVariable
+              id: pd_extract_json
+              variable: Local.LastExpenseJsonText
+              value: =Mid(Last(Local.LatestMessage).Text, Find("{", Last(Local.LatestMessage).Text), Len(Last(Local.LatestMessage).Text) - Find("{", Last(Local.LatestMessage).Text) + 1)
+            - kind: SetVariable
+              id: pd_append_draft_json
+              variable: Local.DraftItemsJson
+              value: '=If(IsBlank(Coalesce(Local.DraftItemsJson,"")), "[" & Local.LastExpenseJsonText & "]", Mid(Local.DraftItemsJson, 1, Len(Local.DraftItemsJson)-1) & "," & Local.LastExpenseJsonText & "]")'
+            - kind: SetVariable
+              id: pd_inc_draft_count
+              variable: Local.DraftItemCount
+              value: =If(IsBlank(Coalesce(Local.DraftItemCount,"")), "1", Text(Value(Local.DraftItemCount) + 1))
+            - kind: SetVariable
+              id: pd_set_last_reference
+              variable: Local.LastAddedReference
+              value: =Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).reference), "")
+            - kind: SetVariable
+              id: pd_clear_date
+              variable: Local.TravelDate
+              value: =""
+            - kind: SetVariable
+              id: pd_clear_zip
+              variable: Local.ZipCode
+              value: =""
+            - kind: SetVariable
+              id: pd_clear_qty
+              variable: Local.Quantity
+              value: =""
+            - kind: SetVariable
+              id: pd_clear_travelers
+              variable: Local.Travelers
+              value: =""
+            - kind: SetVariable
+              id: pd_clear_work_order
+              variable: Local.WorkOrder
+              value: =""
+            - kind: SetVariable
+              id: pd_clear_capital
+              variable: Local.IsCapital
+              value: =""
+            - kind: SetVariable
+              id: pd_clear_desc
+              variable: Local.Description
+              value: =""
+            - kind: SetVariable
+              id: pd_clear_choice
+              variable: Local.AccountChoice
+              value: =""
+            - kind: SetVariable
+              id: pd_clear_activity_override
+              variable: Local.ActivityCodeOverride
+              value: =""
+            - kind: SendActivity
+              id: pd_added_msg
+              activity: '="Added: " & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).reference), "item") & ". Coding: Dept " & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).departmentCode), "(unknown)") & " / Act " & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).activityCode), "(unknown)") & " / Acct " & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).accountCode), "(unknown)") & If(IsBlank(Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).glAccountOverride), "")), "", " (GL override " & Text(ParseJSON(Local.LastExpenseJsonText).glAccountOverride) & ")") & ". Draft items: " & Coalesce(Local.DraftItemCount,"0") & ". Reply Submit to send or Review to see details."'
+            - kind: ConditionGroup
+              id: pd_auto_add_mileage
+              conditions:
+                - id: pd_should_auto_add_mileage
+                  condition: =!IsBlank(Find("TRUE", Upper(Coalesce(Local.PendingAutoAddMileage,""))))
+                  actions:
+                    - kind: SetVariable
+                      id: pd_clear_pending_flag
+                      variable: Local.PendingAutoAddMileage
+                      value: =""
+                    - kind: SetVariable
+                      id: pd_set_mileage_desc_from_pending
+                      variable: Local.Description
+                      value: =Coalesce(Local.PendingAutoText,"")
+                    - kind: SetVariable
+                      id: pd_clear_pending_text
+                      variable: Local.PendingAutoText
+                      value: =""
+                    - kind: SetVariable
+                      id: pd_clear_miles_for_auto
+                      variable: Local.Miles
+                      value: =""
+                    - kind: SetVariable
+                      id: pd_clear_date_for_auto
+                      variable: Local.TravelDate
+                      value: =""
+                    - kind: SendActivity
+                      id: pd_auto_add_msg
+                      activity: ="Now adding the mileage you mentioned..."
+                    - kind: GotoAction
+                      id: pd_go_auto_mileage
+                      actionId: build_mileage_agent_input
+              elseActions:
+                - kind: GotoAction
+                  id: pd_back_to_menu
+                  actionId: ask_mode
+      elseActions:
+        - kind: EndConversation
+          id: end_pd_fallback
+
+    # ----------------------------
+    # MILEAGE PATH
+    # ----------------------------
+    - kind: SendActivity
+      id: mileage_start
+      activity: ="OK - mileage. I'll ask a few quick questions."
+
+    - kind: Question
+      id: ask_travel_date_mileage
+      variable: Local.TravelDate
+      entity: StringPrebuiltEntity
+      skipQuestionMode: SkipOnFirstExecutionIfVariableHasValue
+      prompt: "Travel date (e.g., 2025-12-12 or 12/12/2025)."
+
+    - kind: Question
+      id: ask_miles_mileage
+      variable: Local.Miles
+      entity: StringPrebuiltEntity
+      skipQuestionMode: SkipOnFirstExecutionIfVariableHasValue
+      prompt: "How many miles did you drive?"
+
+    - kind: Question
+      id: ask_description_mileage
+      variable: Local.Description
+      entity: StringPrebuiltEntity
+      skipQuestionMode: SkipOnFirstExecutionIfVariableHasValue
+      prompt: "Short description (what trip / why?)"
+
+    - kind: SetVariable
+      id: build_mileage_agent_input
+      variable: Local.AgentInput
+      value: |-
+        =UserMessage(
+          "MODE=Mileage; " &
+          "RequesterEmail=" & Coalesce(Local.RequesterEmail,"") & "; " &
+          "DepartmentCode=" & Coalesce(Local.DepartmentCode,"") & "; " &
+          "TravelDate=" & Coalesce(Local.TravelDate,"") & "; " &
+          "Miles=" & Coalesce(Local.Miles,"") & "; " &
+          "WorkOrder=" & If(!IsBlank(Find("NONE", Upper(Coalesce(Local.WorkOrder,"")))), "", Coalesce(Local.WorkOrder,"")) & "; " &
+          "IsCapital=" & Coalesce(Local.IsCapital,"") & "; " &
+          "Description=" & Coalesce(Local.Description,"") & "; " &
+          "ActivityCodeOverride=" & Coalesce(Local.ActivityCodeOverride,"") & "; " &
+          "AccountChoice=" & Coalesce(Local.AccountChoice,"")
+        )
+
+    - kind: InvokeAzureAgent
+      id: invoke_mileage_processor
+      agent:
+        name: Travel-Expense-Bot
+      conversationId: =System.ConversationId
+      input:
+        messages: =Local.AgentInput
+      output:
+        messages: Local.LatestMessage
+        autoSend: false
+
+    - kind: ConditionGroup
+      id: mileage_postprocess
+      conditions:
+        - id: mileage_needs_info
+          condition: =!IsBlank(Find("[NEEDS_INFO]", Upper(Last(Local.LatestMessage).Text)))
+          actions:
+            - kind: SetVariable
+              id: mileage_capture_prompt
+              variable: Local.NeedsInfoPrompt
+              value: =Last(Local.LatestMessage).Text
+            - kind: SetVariable
+              id: mileage_clean_prompt
+              variable: Local.NeedsInfoPromptClean
+              value: =Trim(Substitute(Substitute(Coalesce(Local.NeedsInfoPrompt,""), "[NEEDS_INFO]", ""), "[COMPLETED]", ""))
+            - kind: Question
+              id: mileage_followup
+              variable: Local.FollowupAnswer
+              entity: StringPrebuiltEntity
+              prompt: "{Local.NeedsInfoPromptClean}"
+
+            - kind: ConditionGroup
+              id: mileage_followup_route
+              conditions:
+                - id: mileage_need_miles
+                  condition: =!IsBlank(Find("MILE", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_miles_from_followup
+                      variable: Local.Miles
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_mileage_miles
+                      actionId: build_mileage_agent_input
+
+                - id: mileage_need_dept
+                  condition: =!IsBlank(Find("DEPARTMENT", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_mileage_dept_from_followup
+                      variable: Local.DepartmentCode
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_mileage_dept
+                      actionId: build_mileage_agent_input
+
+                - id: mileage_need_date
+                  condition: =!IsBlank(Find("DATE", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_mileage_date_from_followup
+                      variable: Local.TravelDate
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_mileage_date
+                      actionId: build_mileage_agent_input
+
+                - id: mileage_need_choice
+                  condition: =!IsBlank(Find("(A)", Upper(Local.NeedsInfoPrompt)))
+                  actions:
+                    - kind: SetVariable
+                      id: set_mileage_choice_from_followup
+                      variable: Local.AccountChoice
+                      value: =Local.FollowupAnswer
+                    - kind: GotoAction
+                      id: retry_mileage_choice
+                      actionId: build_mileage_agent_input
+              elseActions:
+                - kind: SetVariable
+                  id: set_mileage_desc_from_followup
+                  variable: Local.Description
+                  value: =Local.FollowupAnswer
+                - kind: GotoAction
+                  id: retry_mileage_default
+                  actionId: build_mileage_agent_input
+
+        - id: mileage_completed
+          condition: =!IsBlank(Find("[COMPLETED]", Upper(Last(Local.LatestMessage).Text)))
+          actions:
+            - kind: SetVariable
+              id: mileage_extract_json
+              variable: Local.LastExpenseJsonText
+              value: =Mid(Last(Local.LatestMessage).Text, Find("{", Last(Local.LatestMessage).Text), Len(Last(Local.LatestMessage).Text) - Find("{", Last(Local.LatestMessage).Text) + 1)
+            - kind: SetVariable
+              id: mileage_append_draft_json
+              variable: Local.DraftItemsJson
+              value: '=If(IsBlank(Coalesce(Local.DraftItemsJson,"")), "[" & Local.LastExpenseJsonText & "]", Mid(Local.DraftItemsJson, 1, Len(Local.DraftItemsJson)-1) & "," & Local.LastExpenseJsonText & "]")'
+            - kind: SetVariable
+              id: mileage_inc_draft_count
+              variable: Local.DraftItemCount
+              value: =If(IsBlank(Coalesce(Local.DraftItemCount,"")), "1", Text(Value(Local.DraftItemCount) + 1))
+            - kind: SetVariable
+              id: mileage_set_last_reference
+              variable: Local.LastAddedReference
+              value: =Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).reference), "")
+            - kind: SetVariable
+              id: mileage_clear_date
+              variable: Local.TravelDate
+              value: =""
+            - kind: SetVariable
+              id: mileage_clear_miles
+              variable: Local.Miles
+              value: =""
+            - kind: SetVariable
+              id: mileage_clear_work_order
+              variable: Local.WorkOrder
+              value: =""
+            - kind: SetVariable
+              id: mileage_clear_capital
+              variable: Local.IsCapital
+              value: =""
+            - kind: SetVariable
+              id: mileage_clear_desc
+              variable: Local.Description
+              value: =""
+            - kind: SetVariable
+              id: mileage_clear_choice
+              variable: Local.AccountChoice
+              value: =""
+            - kind: SetVariable
+              id: mileage_clear_activity_override
+              variable: Local.ActivityCodeOverride
+              value: =""
+            - kind: SendActivity
+              id: mileage_added_msg
+              activity: '="Added: " & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).reference), "item") & ". Coding: Dept " & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).departmentCode), "(unknown)") & " / Act " & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).activityCode), "(unknown)") & " / Acct " & Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).accountCode), "(unknown)") & If(IsBlank(Coalesce(Text(ParseJSON(Local.LastExpenseJsonText).glAccountOverride), "")), "", " (GL override " & Text(ParseJSON(Local.LastExpenseJsonText).glAccountOverride) & ")") & ". Draft items: " & Coalesce(Local.DraftItemCount,"0") & ". Reply Submit to send or Review to see details."'
+            - kind: GotoAction
+              id: mileage_back_to_menu
+              actionId: ask_mode
+      elseActions:
+        - kind: EndConversation
+          id: end_mileage_fallback
+
+id: ""
+name: travel-expense-flow
+description: DEPRECATED - replaced by Copilot Studio topics in copilot_topics/ (kept only for reference).

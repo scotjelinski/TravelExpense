@@ -1,0 +1,322 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Add a receipt line item to the current travel-expense draft.
+  Looks up the account code via the DepartmentCodes function (expense-codes endpoint).
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  intent: {}
+  displayName: Main
+  actions:
+    - kind: BeginDialog
+      id: beginDialog_InitContext
+      displayName: Init Context
+      input: {}
+      dialog: new_agent.topic.9InitContext
+      output: {}
+
+    - kind: ConditionGroup
+      id: conditionGroup_RequireDept
+      displayName: Require Dept
+      conditions:
+        - id: conditionItem_NoDept
+          condition: =Len(Trim(Coalesce(Global.DepartmentCode, ""))) = 0
+          displayName: No Dept
+          actions:
+            - kind: SetVariable
+              id: setVariable_DepartmentCodeInput_Init
+              displayName: Department Code Input Init
+              variable: Topic.DepartmentCodeInput
+              value: =""
+
+            - kind: Question
+              id: question_DepartmentCode
+              displayName: Department Code
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.DepartmentCodeInput
+              entity: StringPrebuiltEntity
+              prompt: "What's the 3-digit department code for this expense? (example: 620)"
+
+            - kind: SetVariable
+              id: setVariable_SetGlobalDepartmentCode
+              displayName: Set Global Department Code
+              variable: Global.DepartmentCode
+              value: =Coalesce(Match(Trim(Coalesce(Topic.DepartmentCodeInput, "")), "[0-9]{3}").FullMatch, "")
+
+            - kind: ConditionGroup
+              id: conditionGroup_ValidateDepartmentCode
+              displayName: Validate Department Code
+              conditions:
+                - id: conditionItem_DepartmentInvalid
+                  displayName: Department Invalid
+                  condition: =!IsMatch(Global.DepartmentCode, "^[0-9]{3}$")
+                  actions:
+                    - kind: SetVariable
+                      id: setVariable_DepartmentCodeInput_Clear
+                      displayName: Department Code Input Clear
+                      variable: Topic.DepartmentCodeInput
+                      value: =""
+
+                    - kind: Question
+                      id: question_DepartmentCodeRetry
+                      displayName: Department Code (Retry)
+                      interruptionPolicy:
+                        allowInterruption: false
+                      variable: Topic.DepartmentCodeInput
+                      entity: StringPrebuiltEntity
+                      prompt: "Department code must be 3 digits (example: 620). What's the department code?"
+
+                    - kind: SetVariable
+                      id: setVariable_SetGlobalDepartmentCodeRetry
+                      displayName: Set Global Department Code (Retry)
+                      variable: Global.DepartmentCode
+                      value: =Coalesce(Match(Trim(Coalesce(Topic.DepartmentCodeInput, "")), "[0-9]{3}").FullMatch, "")
+
+    - kind: Question
+      id: question_Category
+      displayName: Category
+      interruptionPolicy:
+        allowInterruption: false
+
+      variable: Topic.Category
+      prompt: What type of receipt is this (hotel, airfare, parking, meal, other)?
+      entity: StringPrebuiltEntity
+
+    - kind: Question
+      id: question_Amount
+      displayName: Amount
+      interruptionPolicy:
+        allowInterruption: false
+
+      variable: Topic.Amount
+      prompt: What is the amount (USD)?
+      entity: NumberPrebuiltEntity
+
+    - kind: Question
+      id: question_Description
+      displayName: Description
+      interruptionPolicy:
+        allowInterruption: false
+
+      variable: Topic.Description
+      prompt: Short description (example "Hotel - Denver")?
+      entity: StringPrebuiltEntity
+
+    - kind: SetVariable
+      id: setVariable_Reference
+      displayName: Reference
+      variable: Topic.Reference
+      value: =Left(Trim(If(IsBlank(Topic.Description), Topic.Category, Topic.Description)), 40)
+
+    - kind: SetVariable
+      id: setVariable_CategoryText
+      displayName: Category Text
+      variable: Topic.CategoryText
+      value: =Lower(Trim(Topic.Category & " " & Topic.Description))
+
+    - kind: SetVariable
+      id: setVariable_ActivityCode
+      displayName: Activity Code
+      variable: Topic.ActivityCode
+      value: =If(Find("wellness", Topic.CategoryText) > 0, "790", If(Find("train", Topic.CategoryText) > 0 || Find("conference", Topic.CategoryText) > 0 || Find("cert", Topic.CategoryText) > 0 || Find("education", Topic.CategoryText) > 0, "770", If(Find("meal", Topic.CategoryText) > 0 || Find("cater", Topic.CategoryText) > 0, "710", "700")))
+
+    - kind: SetVariable
+      id: setVariable_GlOverride
+      displayName: GL Override
+      variable: Topic.GlOverride
+      value: =If(Global.IsCapital = true || !IsBlank(Global.WorkOrder), "107200", "")
+
+    - kind: BeginDialog
+      id: beginDialog_GetExpenseCodes
+      displayName: Get Expense Codes
+      input:
+        binding:
+          activityCode: =Topic.ActivityCode
+          departmentCode: =Global.DepartmentCode
+
+      dialog: new_agent.action.TravelExpense-ExpenseCodesLookup
+      output:
+        binding:
+          activityCode: Topic.ExpenseCodesActivityCode
+          departmentCode: Topic.ExpenseCodesDepartmentCode
+          matches: Topic.ExpenseCodesMatches
+
+    - kind: ConditionGroup
+      id: conditionGroup_NoMatches
+      displayName: No Matches
+      conditions:
+        - id: conditionItem_NoMatches
+          condition: =CountRows(Topic.ExpenseCodesMatches) = 0
+          displayName: No Matches
+          actions:
+            - kind: SendActivity
+              id: sendActivity_NoMatches
+              displayName: No Matches
+              activity: No valid account codes found for Dept {Global.DepartmentCode} and Activity {Topic.ActivityCode}. Try "change department" or adjust the category.
+
+            - kind: EndDialog
+              id: endDialog_NoMatches
+              displayName: No Matches
+
+    - kind: ConditionGroup
+      id: conditionGroup_SelectAccount
+      displayName: Select Account
+      conditions:
+        - id: conditionItem_SingleMatch
+          condition: =CountRows(Topic.ExpenseCodesMatches) = 1
+          displayName: Single Match
+          actions:
+            - kind: SetVariable
+              id: setVariable_SelectedAccount_Single
+              displayName: Selected Account Single
+              variable: Topic.SelectedAccountCode
+              value: =First(Topic.ExpenseCodesMatches).accountCode
+
+      elseActions:
+        - kind: SetVariable
+          id: setVariable_MatchesText
+          displayName: Matches Text
+          variable: Topic.MatchesText
+          value: =Concat(Topic.ExpenseCodesMatches, ThisRecord.accountCode & If(IsBlank(ThisRecord.description), "", " - " & ThisRecord.description) & Char(10))
+
+        - kind: SendActivity
+          id: sendActivity_MultipleMatches
+          displayName: Multiple Matches
+          activity: |-
+            I found multiple valid account codes. Type the account code you want to use:
+
+            {Topic.MatchesText}
+
+        - kind: Question
+          id: question_SelectedAccount
+          displayName: Selected Account
+          interruptionPolicy:
+            allowInterruption: false
+
+          variable: Topic.SelectedAccountCode
+          prompt: Account code?
+          entity: StringPrebuiltEntity
+
+        - kind: SetVariable
+          id: setVariable_NormalizeSelectedAccount
+          displayName: Normalize Selected Account
+          variable: Topic.SelectedAccountCode
+          value: =Trim(Topic.SelectedAccountCode)
+
+        - kind: ConditionGroup
+          id: conditionGroup_InvalidAccountSelection
+          displayName: Invalid Account Selection
+          conditions:
+            - id: conditionItem_InvalidAccountSelection
+              condition: =CountRows(Filter(Topic.ExpenseCodesMatches, ThisRecord.accountCode = Topic.SelectedAccountCode)) = 0
+              displayName: Invalid Account Selection
+              actions:
+                - kind: SendActivity
+                  id: sendActivity_InvalidAccountSelection
+                  displayName: Invalid Account Selection
+                  activity: That account code isn't in the valid list. Please run "add receipt" again and select a code from the list.
+
+                - kind: EndDialog
+                  id: endDialog_InvalidAccountSelection
+                  displayName: Invalid Account Selection
+
+    - kind: SetVariable
+      id: setVariable_AmountText
+      displayName: Amount Text
+      variable: Topic.AmountText
+      value: =Concatenate("$", Text(Value(Topic.Amount), "0.00"))
+
+    - kind: SendActivity
+      id: sendActivity_Summary
+      displayName: Summary
+      activity: |-
+        Proposed coding:
+        - Dept: {Global.DepartmentCode}
+        - Activity: {Topic.ActivityCode}
+        - Account: {Topic.SelectedAccountCode}
+        - GL override: {Topic.GlOverride}
+        - Amount: {Topic.AmountText}
+        - Reference: {Topic.Reference}
+
+    - kind: Question
+      id: question_ApproveAdd
+      displayName: Approve Add
+      interruptionPolicy:
+        allowInterruption: false
+
+      variable: Topic.ApproveAdd
+      prompt: Approve and add this to the draft? (yes/no)
+      entity: BooleanPrebuiltEntity
+
+    - kind: ConditionGroup
+      id: conditionGroup_AddToDraft
+      displayName: Add To Draft
+      conditions:
+        - id: conditionItem_AddToDraft
+          condition: =Topic.ApproveAdd = true
+          displayName: Add To Draft
+          actions:
+            - kind: SetVariable
+              id: setVariable_ReferenceSafe
+              displayName: Reference Safe
+              variable: Topic.ReferenceSafe
+              value: =Substitute(Substitute(Substitute(Topic.Reference, Char(34), "'"), Char(10), " "), Char(13), " ")
+
+            - kind: SetVariable
+              id: setVariable_NewItemJson
+              displayName: New Item JSON
+              variable: Topic.NewItemJson
+              value: =Concatenate("{", Char(34), "mode", Char(34), ":", Char(34), "Receipt", Char(34), ",", Char(34), "departmentCode", Char(34), ":", Char(34), Global.DepartmentCode, Char(34), ",", Char(34), "activityCode", Char(34), ":", Char(34), Topic.ActivityCode, Char(34), ",", Char(34), "accountCode", Char(34), ":", Char(34), Topic.SelectedAccountCode, Char(34), ",", Char(34), "glAccountOverride", Char(34), ":", Char(34), Topic.GlOverride, Char(34), ",", Char(34), "reference", Char(34), ":", Char(34), Topic.ReferenceSafe, Char(34), ",", Char(34), "amountTotal", Char(34), ":", Text(Value(Topic.Amount), "0.00"), "}")
+
+            - kind: SetVariable
+              id: setVariable_AppendDraftItemsJson
+              displayName: Append Draft Items JSON
+              variable: Global.DraftItemsJson
+              value: =If(IsBlank(Global.DraftItemsJson) || Global.DraftItemsJson = "[]", Concatenate("[", Topic.NewItemJson, "]"), Concatenate(Left(Global.DraftItemsJson, Len(Global.DraftItemsJson) - 1), ",", Topic.NewItemJson, "]"))
+
+            - kind: SetVariable
+              id: setVariable_IncDraftItemCount
+              displayName: Inc Draft Item Count
+              variable: Global.DraftItemCount
+              value: =If(IsBlank(Global.DraftItemCount), 0, Global.DraftItemCount) + 1
+
+            - kind: SetVariable
+              id: setVariable_IncReceiptItemCount
+              displayName: Inc Receipt Item Count
+              variable: Global.ReceiptItemCount
+              value: =If(IsBlank(Global.ReceiptItemCount), 0, Global.ReceiptItemCount) + 1
+
+            - kind: SetVariable
+              id: setVariable_AddReceiptTotal
+              displayName: Add Receipt Total
+              variable: Global.TotalReceiptAmount
+              value: =If(IsBlank(Global.TotalReceiptAmount), 0, Global.TotalReceiptAmount) + Value(Topic.Amount)
+
+            - kind: SetVariable
+              id: setVariable_AppendDraftSummaryText
+              displayName: Append Draft Summary Text
+              variable: Global.DraftSummaryText
+              value: "=Concatenate(If(IsBlank(Global.DraftSummaryText), \"\", Global.DraftSummaryText & Char(10)), \"- Receipt: \", Topic.Reference, \" $\", Text(Value(Topic.Amount), \"0.00\"), \" (Dept \", Global.DepartmentCode, \", Act \", Topic.ActivityCode, \", Acct \", Topic.SelectedAccountCode, If(!IsBlank(Topic.GlOverride), \", GLOverride \" & Topic.GlOverride, \"\"), \")\")"
+
+            - kind: SendActivity
+              id: sendActivity_Added
+              displayName: Added
+              activity: Added. Say "add receipt", "add per diem", "add mileage", "review draft", or "submit".
+
+            - kind: EndDialog
+              id: endDialog_Added
+              displayName: Added
+
+      elseActions:
+        - kind: SendActivity
+          id: sendActivity_NotAdded
+          displayName: Not Added
+          activity: Okay — not added. Say "add receipt" when you're ready.
+
+        - kind: EndDialog
+          id: endDialog_NotAdded
+          displayName: Not Added
+
+inputType: {}
+outputType: {}

@@ -1,0 +1,50 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Answer travel expense policy questions using configured knowledge sources.
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  displayName: Main
+  intent: {}
+  actions:
+    - kind: SearchAndSummarizeContent
+      id: search_policy
+      displayName: Search Policy
+      userInput: =System.Activity.Text
+      autoSend: false
+      variable: Topic.Answer
+      responseCaptureType: FullResponse
+      additionalInstructions: |-
+        Answer the user's travel expense policy question for CORE.
+        Be concise. Include citations when available.
+
+    - kind: ConditionGroup
+      id: conditionGroup_HasAnswer
+      displayName: Has Answer
+      conditions:
+        - id: conditionItem_HasAnswer
+          displayName: Has Answer
+          condition: =!IsBlank(Topic.Answer)
+          actions:
+            - kind: SendActivity
+              id: sendActivity_Answer
+              displayName: Answer
+              activity: "{Topic.Answer.Text.MarkdownContent}"
+
+            - kind: EndDialog
+              id: endDialog_Answered
+              displayName: Answered
+              clearTopicQueue: true
+
+      elseActions:
+        - kind: SendActivity
+          id: sendActivity_NoAnswer
+          displayName: No Answer
+          activity: I couldn't find an answer for that. Try rephrasing your question.
+
+        - kind: EndDialog
+          id: endDialog_NoAnswer
+          displayName: No Answer
+          clearTopicQueue: true
+inputType: {}
+outputType: {}

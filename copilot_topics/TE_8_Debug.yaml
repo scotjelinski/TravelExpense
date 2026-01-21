@@ -1,0 +1,128 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Diagnostics topic to help troubleshoot requests and backend connectivity.
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  displayName: Main
+  intent: {}
+  actions:
+    - kind: BeginDialog
+      id: beginDialog_InitContext
+      displayName: Init Context
+      dialog: new_agent.topic.9InitContext
+      input: {}
+      output: {}
+
+    - kind: SetVariable
+      id: setVariable_LastTopicPrev
+      displayName: Last Topic (Prev)
+      variable: Global.LastTopicPrev
+      value: =Coalesce(Global.LastTopic, "")
+
+    - kind: SetVariable
+      id: setVariable_LastTopicNow
+      displayName: Last Topic (Now)
+      variable: Global.LastTopic
+      value: ="debug"
+
+    - kind: SetVariable
+      id: setVariable_InitApiBaseUrl
+      displayName: Init API Base URL
+      variable: Global.ApiBaseUrl
+      value: =If(IsBlank(Global.ApiBaseUrl), "https://departmentcodes-gnfncpgxdueyfdh9.eastus2-01.azurewebsites.net", Global.ApiBaseUrl)
+
+    - kind: SetVariable
+      id: setVariable_InitDraftItemsJson
+      displayName: Init Draft Items JSON
+      variable: Global.DraftItemsJson
+      value: =If(IsBlank(Global.DraftItemsJson), "[]", Global.DraftItemsJson)
+
+    - kind: SetVariable
+      id: setVariable_InitDraftItemCount
+      displayName: Init Draft Item Count
+      variable: Global.DraftItemCount
+      value: =If(IsBlank(Global.DraftItemCount), 0, Global.DraftItemCount)
+
+    - kind: SetVariable
+      id: setVariable_InitReceiptItemCount
+      displayName: Init Receipt Item Count
+      variable: Global.ReceiptItemCount
+      value: =If(IsBlank(Global.ReceiptItemCount), 0, Global.ReceiptItemCount)
+
+    - kind: SetVariable
+      id: setVariable_InitWorkOrder
+      displayName: Init Work Order
+      variable: Global.WorkOrder
+      value: =If(IsBlank(Global.WorkOrder), "", Global.WorkOrder)
+
+    - kind: SetVariable
+      id: setVariable_InitIsCapital
+      displayName: Init Is Capital
+      variable: Global.IsCapital
+      value: =If(IsBlank(Global.IsCapital), false, Global.IsCapital)
+
+    - kind: SetVariable
+      id: setVariable_SystemUserEmail
+      displayName: System User Email
+      variable: Topic.SystemUserEmail
+      value: =Coalesce(System.User.Email, "")
+
+    - kind: SendActivity
+      id: sendActivity_DebugContext
+      displayName: Debug Context
+      activity: |-
+        RouterVersion: {Global.RouterVersion}
+        PerDiemTopicVersion: {Global.PerDiemTopicVersion}
+        LastRoute: {Global.LastRoute}
+        LastRouterText: {Global.LastRouterText}
+        LastTopicPrev: {Global.LastTopicPrev}
+        LastTopicNow: {Global.LastTopic}
+        System.User.Email: {Topic.SystemUserEmail}
+        IdentityCaptured: {Global.IdentityCaptured}
+        DraftItemCount: {Global.DraftItemCount}
+        ReceiptItemCount: {Global.ReceiptItemCount}
+        RequesterEmail: {Global.RequesterEmail}
+        DepartmentCode: {Global.DepartmentCode}
+        WorkOrder: {Global.WorkOrder}
+        IsCapital: {Global.IsCapital}
+        ApiBaseUrl: {Global.ApiBaseUrl}
+        OrgChartOk: {Global.OrgChartOk}
+        OrgChartFound: {Global.OrgChartFound}
+        OrgChartEmail: {Global.OrgChartEmail}
+        OrgChartDeptCode: {Global.OrgChartDepartmentCode}
+        OrgChartDeptName: {Global.OrgChartDepartmentName}
+        OrgChartError: {Global.OrgChartError}
+
+    - kind: BeginDialog
+      id: beginDialog_Health
+      displayName: Health
+      dialog: new_agent.action.TravelExpense-HealthCheck
+      input: {}
+      output:
+        binding:
+          ok: Topic.HealthOk
+
+    - kind: SendActivity
+      id: sendActivity_HealthOk
+      displayName: Health OK
+      activity: |-
+        Function health ok: {Topic.HealthOk}
+
+    - kind: SendActivity
+      id: sendActivity_OrgchartNote
+      displayName: OrgChart Note
+      activity: |-
+        OrgChart status:
+        - OrgChartOk: {Global.OrgChartOk}
+        - OrgChartFound: {Global.OrgChartFound}
+        - OrgChartEmail: {Global.OrgChartEmail}
+        - OrgChartDeptCode: {Global.OrgChartDepartmentCode}
+        - OrgChartDeptName: {Global.OrgChartDepartmentName}
+        - OrgChartError: {Global.OrgChartError}
+
+    - kind: EndDialog
+      id: endDialog_Debug
+      displayName: Debug
+inputType: {}
+outputType: {}

@@ -1,0 +1,148 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Review the current draft: item count, totals, and a line-by-line summary.
+  Allows clearing the draft.
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  displayName: Main
+  intent: {}
+  actions:
+    - kind: BeginDialog
+      id: beginDialog_InitContext
+      displayName: Init Context
+      dialog: new_agent.topic.9InitContext
+      input: {}
+      output: {}
+
+    - kind: ConditionGroup
+      id: conditionGroup_DraftEmpty
+      displayName: Draft Empty
+      conditions:
+        - id: conditionItem_DraftEmpty
+          displayName: Draft Empty
+          condition: =IsBlank(Global.DraftItemsJson) || Global.DraftItemsJson = "[]" || IsBlank(Global.DraftItemCount) || Global.DraftItemCount = 0
+          actions:
+            - kind: SendActivity
+              id: sendActivity_DraftEmpty
+              displayName: Draft Empty
+              activity: Your draft is empty. Say "add receipt", "add per diem", or "add mileage" to add items.
+
+            - kind: EndDialog
+              id: endDialog_DraftEmpty
+              displayName: Draft Empty
+
+    - kind: SetVariable
+      id: setVariable_TotalAmount
+      displayName: Total Amount
+      variable: Topic.TotalAmount
+      value: =If(IsBlank(Global.TotalReceiptAmount), 0, Global.TotalReceiptAmount) + If(IsBlank(Global.TotalPerDiemAmount), 0, Global.TotalPerDiemAmount) + If(IsBlank(Global.TotalMileageAmount), 0, Global.TotalMileageAmount)
+
+    - kind: SetVariable
+      id: setVariable_ReviewText
+      displayName: Review Text
+      variable: Topic.ReviewText
+      value: |-
+        =Concatenate("Draft items: ", Text(Global.DraftItemCount, "0"), Char(10), "Total: $", Text(Topic.TotalAmount, "0.00"), Char(10), "Receipt total: $", Text(If(IsBlank(Global.TotalReceiptAmount), 0, Global.TotalReceiptAmount), "0.00"), Char(10), "Per diem total: $", Text(If(IsBlank(Global.TotalPerDiemAmount), 0, Global.TotalPerDiemAmount), "0.00"), Char(10), "Mileage total: $", Text(If(IsBlank(Global.TotalMileageAmount), 0, Global.TotalMileageAmount), "0.00"), Char(10), Char(10), "Lines:", Char(10), Global.DraftSummaryText)
+
+    - kind: SendActivity
+      id: sendActivity_Review
+      displayName: Review
+      activity: "{Topic.ReviewText}"
+
+    - kind: Question
+      id: question_NextStep
+      displayName: Next Step
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.NextStep
+      entity: StringPrebuiltEntity
+      prompt: Type "submit", "clear", or "add more".
+
+    - kind: ConditionGroup
+      id: conditionGroup_RouteSubmitFromReview
+      displayName: Route Submit From Review
+      conditions:
+        - id: conditionItem_RouteSubmitFromReview
+          displayName: Route Submit From Review
+          condition: =Find("submit", Lower(Topic.NextStep)) > 0 || Find("send", Lower(Topic.NextStep)) > 0
+          actions:
+            - kind: BeginDialog
+              id: beginDialog_ToSubmit
+              displayName: To Submit
+              dialog: new_agent.topic.TravelExpenseSubmitDraft
+
+            - kind: EndDialog
+              id: endDialog_RoutedSubmit
+              displayName: Routed Submit
+
+    - kind: ConditionGroup
+      id: conditionGroup_ClearDraft
+      displayName: Clear Draft
+      conditions:
+        - id: conditionItem_ClearDraft
+          displayName: Clear Draft
+          condition: =Find("clear", Lower(Topic.NextStep)) > 0
+          actions:
+            - kind: SetVariable
+              id: setVariable_ClearDraftItemsJson
+              displayName: Clear Draft Items JSON
+              variable: Global.DraftItemsJson
+              value: ="[]"
+
+            - kind: SetVariable
+              id: setVariable_ClearDraftItemCount
+              displayName: Clear Draft Item Count
+              variable: Global.DraftItemCount
+              value: =0
+
+            - kind: SetVariable
+              id: setVariable_ClearReceiptItemCount
+              displayName: Clear Receipt Item Count
+              variable: Global.ReceiptItemCount
+              value: =0
+
+            - kind: SetVariable
+              id: setVariable_ClearTotalsReceipt
+              displayName: Clear Totals Receipt
+              variable: Global.TotalReceiptAmount
+              value: =0
+
+            - kind: SetVariable
+              id: setVariable_ClearTotalsPerDiem
+              displayName: Clear Totals Per Diem
+              variable: Global.TotalPerDiemAmount
+              value: =0
+
+            - kind: SetVariable
+              id: setVariable_ClearTotalsMileage
+              displayName: Clear Totals Mileage
+              variable: Global.TotalMileageAmount
+              value: =0
+
+            - kind: SetVariable
+              id: setVariable_ClearSummaryText
+              displayName: Clear Summary Text
+              variable: Global.DraftSummaryText
+              value: =""
+
+            - kind: SendActivity
+              id: sendActivity_Cleared
+              displayName: Cleared
+              activity: Draft cleared.
+
+            - kind: EndDialog
+              id: endDialog_Cleared
+              displayName: Cleared
+
+      elseActions:
+        - kind: SendActivity
+          id: sendActivity_Next
+          displayName: Next
+          activity: Okay. Say "add receipt", "add per diem", "add mileage", or "submit".
+
+        - kind: EndDialog
+          id: endDialog_Next
+          displayName: Next
+inputType: {}
+outputType: {}

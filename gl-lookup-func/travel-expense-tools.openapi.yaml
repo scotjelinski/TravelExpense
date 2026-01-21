@@ -1,0 +1,237 @@
+openapi: 3.0.3
+info:
+  title: Travel Expense Tools
+  version: 1.1.0
+servers:
+  - url: https://REPLACE_WITH_YOUR_FUNCTION_APP.azurewebsites.net
+components:
+  securitySchemes:
+    function_key:
+      type: apiKey
+      name: x-functions-key
+      in: header
+paths:
+  /api/health:
+    get:
+      operationId: travel_expense_tools_health
+      security:
+        - function_key: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+  /api/orgchart-lookup:
+    get:
+      operationId: travel_expense_tools_orgchart_lookup
+      security:
+        - function_key: []
+      parameters:
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OrgChart match + mapped department code
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  found:
+                    type: boolean
+                  email:
+                    type: string
+                  displayName:
+                    type: string
+                  jobTitle:
+                    type: string
+                  departmentName:
+                    type: string
+                  departmentCode:
+                    type: string
+                  departmentNameMapped:
+                    type: string
+                  departmentMatchType:
+                    type: string
+                  departmentCandidates:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        departmentCode:
+                          type: string
+                        departmentName:
+                          type: string
+                  error:
+                    type: string
+  /api/orgchart-lookup-upn:
+    get:
+      operationId: travel_expense_tools_orgchart_lookup_upn
+      security:
+        - function_key: []
+      parameters:
+        - name: upn
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OrgChart match + mapped department code (UPN input)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  found:
+                    type: boolean
+                  email:
+                    type: string
+                  displayName:
+                    type: string
+                  jobTitle:
+                    type: string
+                  departmentName:
+                    type: string
+                  departmentCode:
+                    type: string
+                  departmentNameMapped:
+                    type: string
+                  departmentMatchType:
+                    type: string
+                  departmentCandidates:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        departmentCode:
+                          type: string
+                        departmentName:
+                          type: string
+                  error:
+                    type: string
+  /api/per-diem-lookup:
+    get:
+      operationId: travel_expense_tools_per_diem_lookup
+      security:
+        - function_key: []
+      parameters:
+        - name: zipCode
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: travelDate
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Per diem lookup result (M&IE daily rate)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  zipCode:
+                    type: string
+                  travelDate:
+                    type: string
+                  mieRate:
+                    type: number
+                  error:
+                    type: string
+  /api/expense-codes:
+    get:
+      operationId: expense_codes_lookup_get_expense_codes
+      security:
+        - function_key: []
+      parameters:
+        - name: departmentCode
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: activityCode
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Account code matches
+          content:
+            application/json:
+              schema:
+                type: object
+  /api/import-csv:
+    post:
+      operationId: travel_expense_tools_import_csv
+      security:
+        - function_key: []
+      parameters:
+        - name: includeHeader
+          in: query
+          required: false
+          schema:
+            type: boolean
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: CSV text
+          content:
+            text/csv:
+              schema:
+                type: string
+  /api/submit-report:
+    post:
+      operationId: travel_expense_tools_submit_report
+      security:
+        - function_key: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Submission status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  sent:
+                    type: boolean
+                  toEmail:
+                    type: string
+                  lineCount:
+                    type: integer
+                  amountTotal:
+                    type: number
+                  csvFilename:
+                    type: string
+                  emailError:
+                    type: string

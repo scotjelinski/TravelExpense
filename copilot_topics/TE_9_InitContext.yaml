@@ -1,0 +1,382 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Initializer that ensures required context is set for the current draft:
+  - Global.RequesterEmail (ask the user if not available from the channel)
+  - Global.DepartmentCode (auto via OrgChart lookup; fallback to asking the user)
+
+  This topic should be called by other topics via BeginDialog.
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  displayName: Main
+  intent: {}
+  actions:
+    - kind: SetVariable
+      id: setVariable_InitIdentityCaptured
+      displayName: Init Identity Captured
+      variable: Global.IdentityCaptured
+      value: =If(IsBlank(Global.IdentityCaptured), false, Global.IdentityCaptured)
+
+    - kind: SetVariable
+      id: setVariable_EmailFromTeams
+      displayName: Email From Teams
+      variable: Topic.EmailFromTeams
+      value: =Lower(Trim(Coalesce(System.User.Email, "")))
+
+    - kind: SetVariable
+      id: setVariable_InitEmailInput
+      displayName: Init Email Input
+      variable: Topic.EmailInput
+      value: =""
+
+    - kind: SetVariable
+      id: setVariable_InitOrgchartStatus
+      displayName: Init Orgchart Status
+      variable: Global.OrgChartOk
+      value: =If(IsBlank(Global.OrgChartOk), false, Global.OrgChartOk)
+
+    - kind: SetVariable
+      id: setVariable_InitOrgchartFound
+      displayName: Init Orgchart Found
+      variable: Global.OrgChartFound
+      value: =If(IsBlank(Global.OrgChartFound), false, Global.OrgChartFound)
+
+    - kind: SetVariable
+      id: setVariable_InitOrgchartError
+      displayName: Init Orgchart Error
+      variable: Global.OrgChartError
+      value: =If(IsBlank(Global.OrgChartError), "", Global.OrgChartError)
+
+    - kind: SetVariable
+      id: setVariable_InitOrgchartEmail
+      displayName: Init Orgchart Email
+      variable: Global.OrgChartEmail
+      value: =If(IsBlank(Global.OrgChartEmail), "", Global.OrgChartEmail)
+
+    - kind: SetVariable
+      id: setVariable_InitOrgchartDeptCode
+      displayName: Init Orgchart Dept Code
+      variable: Global.OrgChartDepartmentCode
+      value: =If(IsBlank(Global.OrgChartDepartmentCode), "", Global.OrgChartDepartmentCode)
+
+    - kind: SetVariable
+      id: setVariable_InitOrgchartDeptName
+      displayName: Init Orgchart Dept Name
+      variable: Global.OrgChartDepartmentName
+      value: =If(IsBlank(Global.OrgChartDepartmentName), "", Global.OrgChartDepartmentName)
+
+    - kind: ConditionGroup
+      id: conditionGroup_CollectRequesterEmail
+      displayName: Collect Requester Email
+      conditions:
+        - id: conditionItem_RequesterEmailNotCaptured
+          displayName: Requester Email Not Captured
+          condition: =Len(Trim(Coalesce(Global.RequesterEmail, ""))) = 0
+          actions:
+            - kind: Question
+              id: question_RequesterEmail
+              displayName: Requester Email
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.EmailInput
+              entity: StringPrebuiltEntity
+              prompt: "Provide the CORE email/UPN for who this expense report is for. (Type \"me\" to use your signed-in email.)"
+
+            - kind: SetVariable
+              id: setVariable_SetGlobalRequesterEmailFromInput
+              displayName: Set Global Requester Email (From Input)
+              variable: Global.RequesterEmail
+              value: =If(Lower(Trim(Coalesce(Topic.EmailInput, ""))) = "me", Topic.EmailFromTeams, Lower(Trim(Coalesce(Topic.EmailInput, ""))))
+
+            - kind: ConditionGroup
+              id: conditionGroup_ValidateRequesterEmail
+              displayName: Validate Requester Email
+              conditions:
+                - id: conditionItem_RequesterEmailInvalid
+                  displayName: Requester Email Invalid
+                  condition: =Len(Trim(Coalesce(Global.RequesterEmail, ""))) = 0 || Find("@", Global.RequesterEmail) <= 0 || Right(Global.RequesterEmail, 10) <> "@core.coop"
+                  actions:
+                    - kind: Question
+                      id: question_RequesterEmailRetry
+                      displayName: Requester Email (Retry)
+                      interruptionPolicy:
+                        allowInterruption: false
+                      variable: Topic.EmailInput
+                      entity: StringPrebuiltEntity
+                      prompt: "Please enter a valid CORE email/UPN ending in @core.coop (example: name@core.coop)."
+
+                    - kind: SetVariable
+                      id: setVariable_SetGlobalRequesterEmailFromRetry
+                      displayName: Set Global Requester Email (Retry)
+                      variable: Global.RequesterEmail
+                      value: =If(Lower(Trim(Coalesce(Topic.EmailInput, ""))) = "me", Topic.EmailFromTeams, Lower(Trim(Coalesce(Topic.EmailInput, ""))))
+
+            - kind: ConditionGroup
+              id: conditionGroup_RequesterEmailStillInvalid
+              displayName: Requester Email Still Invalid
+              conditions:
+                - id: conditionItem_RequesterEmailStillInvalid
+                  displayName: Requester Email Still Invalid
+                  condition: =Len(Trim(Coalesce(Global.RequesterEmail, ""))) = 0 || Find("@", Global.RequesterEmail) <= 0 || Right(Global.RequesterEmail, 10) <> "@core.coop"
+                  actions:
+                    - kind: Question
+                      id: question_RequesterEmailFinal
+                      displayName: Requester Email (Final)
+                      interruptionPolicy:
+                        allowInterruption: false
+                      variable: Topic.EmailInput
+                      entity: StringPrebuiltEntity
+                      prompt: "I still need a valid CORE email/UPN ending in @core.coop (example: name@core.coop)."
+
+                    - kind: SetVariable
+                      id: setVariable_SetGlobalRequesterEmailFromFinal
+                      displayName: Set Global Requester Email (Final)
+                      variable: Global.RequesterEmail
+                      value: =If(Lower(Trim(Coalesce(Topic.EmailInput, ""))) = "me", Topic.EmailFromTeams, Lower(Trim(Coalesce(Topic.EmailInput, ""))))
+
+            - kind: SetVariable
+              id: setVariable_SetIdentityCaptured
+              displayName: Set Identity Captured
+              variable: Global.IdentityCaptured
+              value: =Len(Trim(Coalesce(Global.RequesterEmail, ""))) > 0 && Find("@", Global.RequesterEmail) > 0 && Right(Global.RequesterEmail, 10) = "@core.coop"
+
+            - kind: SetVariable
+              id: setVariable_ClearDeptOnIdentitySet
+              displayName: Clear Dept On Identity Set
+              variable: Global.DepartmentCode
+              value: =If(Global.IdentityCaptured = true, "", Global.DepartmentCode)
+
+            - kind: SetVariable
+              id: setVariable_ClearDeptNameOnIdentitySet
+              displayName: Clear Dept Name On Identity Set
+              variable: Global.DepartmentName
+              value: =If(Global.IdentityCaptured = true, "", Global.DepartmentName)
+
+            - kind: SetVariable
+              id: setVariable_ResetOrgChartOkOnIdentitySet
+              displayName: Reset OrgChart Ok On Identity Set
+              variable: Global.OrgChartOk
+              value: =If(Global.IdentityCaptured = true, false, Global.OrgChartOk)
+
+            - kind: SetVariable
+              id: setVariable_ResetOrgChartFoundOnIdentitySet
+              displayName: Reset OrgChart Found On Identity Set
+              variable: Global.OrgChartFound
+              value: =If(Global.IdentityCaptured = true, false, Global.OrgChartFound)
+
+            - kind: SetVariable
+              id: setVariable_ResetOrgChartErrorOnIdentitySet
+              displayName: Reset OrgChart Error On Identity Set
+              variable: Global.OrgChartError
+              value: =If(Global.IdentityCaptured = true, "", Global.OrgChartError)
+
+            - kind: SetVariable
+              id: setVariable_ResetOrgChartEmailOnIdentitySet
+              displayName: Reset OrgChart Email On Identity Set
+              variable: Global.OrgChartEmail
+              value: =If(Global.IdentityCaptured = true, "", Global.OrgChartEmail)
+
+            - kind: SetVariable
+              id: setVariable_ResetOrgChartDeptCodeOnIdentitySet
+              displayName: Reset OrgChart Dept Code On Identity Set
+              variable: Global.OrgChartDepartmentCode
+              value: =If(Global.IdentityCaptured = true, "", Global.OrgChartDepartmentCode)
+
+            - kind: SetVariable
+              id: setVariable_ResetOrgChartDeptNameOnIdentitySet
+              displayName: Reset OrgChart Dept Name On Identity Set
+              variable: Global.OrgChartDepartmentName
+              value: =If(Global.IdentityCaptured = true, "", Global.OrgChartDepartmentName)
+
+    - kind: ConditionGroup
+      id: conditionGroup_AutoDeptFromOrgchart
+      displayName: Auto Dept From Orgchart
+      conditions:
+        - id: conditionItem_AutoDeptFromOrgchart
+          displayName: Auto Dept From Orgchart
+          condition: =Len(Trim(Coalesce(Global.DepartmentCode, ""))) = 0 && Global.IdentityCaptured = true
+          actions:
+            - kind: SetVariable
+              id: setVariable_InitOrgOk
+              displayName: Init Org Ok
+              variable: Topic.OrgOk
+              value: =false
+
+            - kind: SetVariable
+              id: setVariable_InitOrgFound
+              displayName: Init Org Found
+              variable: Topic.OrgFound
+              value: =false
+
+            - kind: SetVariable
+              id: setVariable_InitOrgDepartmentCode
+              displayName: Init Org Department Code
+              variable: Topic.OrgDepartmentCode
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_InitOrgDepartmentName
+              displayName: Init Org Department Name
+              variable: Topic.OrgDepartmentName
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_InitOrgDepartmentNameMapped
+              displayName: Init Org Department Name Mapped
+              variable: Topic.OrgDepartmentNameMapped
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_InitOrgError
+              displayName: Init Org Error
+              variable: Topic.OrgError
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_InitOrgEmail
+              displayName: Init Org Email
+              variable: Topic.OrgEmail
+              value: =""
+
+            - kind: SetVariable
+              id: setVariable_UpnForOrgchart
+              displayName: UPN For Orgchart
+              variable: Topic.UpnForOrgchart
+              value: =Lower(Trim(Coalesce(Global.RequesterEmail, Topic.EmailFromTeams, "")))
+
+            - kind: BeginDialog
+              id: beginDialog_OrgchartLookup
+              displayName: Orgchart Lookup
+              dialog: new_agent.action.TravelExpense-OrgChartLookupByUpn
+              input:
+                binding:
+                  upn: =Topic.UpnForOrgchart
+              output:
+                binding:
+                  ok: Topic.OrgOk
+                  found: Topic.OrgFound
+                  email: Topic.OrgEmail
+                  departmentCode: Topic.OrgDepartmentCode
+                  departmentName: Topic.OrgDepartmentName
+                  departmentNameMapped: Topic.OrgDepartmentNameMapped
+                  error: Topic.OrgError
+
+            - kind: SetVariable
+              id: setVariable_SetGlobalOrgEmailFromLookup
+              displayName: Set Global Org Email From Lookup
+              variable: Global.OrgChartEmail
+              value: =Lower(Trim(Coalesce(Topic.OrgEmail, Topic.UpnForOrgchart, Global.RequesterEmail, "")))
+
+            - kind: SetVariable
+              id: setVariable_SetGlobalOrgOk
+              displayName: Set Global Org Ok
+              variable: Global.OrgChartOk
+              value: =Topic.OrgOk
+
+            - kind: SetVariable
+              id: setVariable_SetGlobalOrgFound
+              displayName: Set Global Org Found
+              variable: Global.OrgChartFound
+              value: =Topic.OrgFound
+
+            - kind: SetVariable
+              id: setVariable_SetGlobalOrgError
+              displayName: Set Global Org Error
+              variable: Global.OrgChartError
+              value: =Coalesce(Topic.OrgError, "")
+
+            - kind: SetVariable
+              id: setVariable_SetGlobalOrgDeptCode
+              displayName: Set Global Org Dept Code
+              variable: Global.OrgChartDepartmentCode
+              value: =Coalesce(Topic.OrgDepartmentCode, "")
+
+            - kind: SetVariable
+              id: setVariable_SetGlobalOrgDeptName
+              displayName: Set Global Org Dept Name
+              variable: Global.OrgChartDepartmentName
+              value: =Coalesce(Topic.OrgDepartmentNameMapped, Topic.OrgDepartmentName, "")
+
+            - kind: ConditionGroup
+              id: conditionGroup_UseOrgchartDept
+              displayName: Use Orgchart Dept
+              conditions:
+                - id: conditionItem_UseOrgchartDept
+                  displayName: Use Orgchart Dept
+                  condition: =Topic.OrgOk = true && Topic.OrgFound = true && !IsBlank(Topic.OrgDepartmentCode)
+                  actions:
+                    - kind: SetVariable
+                      id: setVariable_SetDeptFromOrgchart
+                      displayName: Set Dept From Orgchart
+                      variable: Global.DepartmentCode
+                      value: =Topic.OrgDepartmentCode
+
+                    - kind: SetVariable
+                      id: setVariable_SetDeptNameFromOrgchart
+                      displayName: Set Dept Name From Orgchart
+                      variable: Global.DepartmentName
+                      value: =If(!IsBlank(Topic.OrgDepartmentNameMapped), Topic.OrgDepartmentNameMapped, Topic.OrgDepartmentName)
+
+    - kind: SetVariable
+      id: setVariable_InitDeptInput
+      displayName: Init Dept Input
+      variable: Topic.DeptInput
+      value: =""
+
+    - kind: ConditionGroup
+      id: conditionGroup_FallbackAskDepartmentCode
+      displayName: Fallback Ask Department Code
+      conditions:
+        - id: conditionItem_FallbackAskDepartmentCode
+          displayName: Fallback Ask Department Code
+          condition: =Len(Trim(Coalesce(Global.DepartmentCode, ""))) = 0
+          actions:
+            - kind: Question
+              id: question_DepartmentCode
+              displayName: Department Code
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.DeptInput
+              entity: StringPrebuiltEntity
+              prompt: "I couldn't auto-detect the department. What's the 3-digit department code? (example: 620)"
+
+            - kind: SetVariable
+              id: setVariable_SetGlobalDepartmentCode
+              displayName: Set Global Department Code
+              variable: Global.DepartmentCode
+              value: =Coalesce(Match(Trim(Coalesce(Topic.DeptInput, "")), "[0-9]{3}").FullMatch, "")
+
+            - kind: ConditionGroup
+              id: conditionGroup_ValidateDepartmentCode
+              displayName: Validate Department Code
+              conditions:
+                - id: conditionItem_DepartmentInvalid
+                  displayName: Department Invalid
+                  condition: =!IsMatch(Global.DepartmentCode, "^[0-9]{3}$")
+                  actions:
+                    - kind: SetVariable
+                      id: setVariable_ClearDeptInputRetry
+                      displayName: Clear Dept Input (Retry)
+                      variable: Topic.DeptInput
+                      value: =""
+
+                    - kind: Question
+                      id: question_DepartmentCodeRetry
+                      displayName: Department Code (Retry)
+                      interruptionPolicy:
+                        allowInterruption: false
+                      variable: Topic.DeptInput
+                      entity: StringPrebuiltEntity
+                      prompt: "Department code must be 3 digits (example: 620). What's the department code?"
+
+                    - kind: SetVariable
+                      id: setVariable_SetGlobalDepartmentCodeRetry
+                      displayName: Set Global Department Code (Retry)
+                      variable: Global.DepartmentCode
+                      value: =Coalesce(Match(Trim(Coalesce(Topic.DeptInput, "")), "[0-9]{3}").FullMatch, "")
+
+    - kind: EndDialog
+      id: endDialog_InitContext
+      displayName: Init Context
+inputType: {}
+outputType: {}
