@@ -1,0 +1,171 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Submit the expense report by calling the Azure function.
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  intent: {}
+  displayName: Main
+  actions:
+    # === CHECK IF CART IS EMPTY ===
+    - kind: ConditionGroup
+      id: conditionGroup_CheckCart
+      displayName: Check Cart
+      conditions:
+        - id: conditionItem_EmptyCart
+          condition: =IsBlank(Global.CartJson) || Global.CartJson = "[]" || Global.CartCount <= 0
+          displayName: Cart Empty
+          actions:
+            - kind: SendActivity
+              id: sendActivity_EmptyCart
+              displayName: Empty Cart
+              activity: |-
+                Your cart is empty. Nothing to submit.
+
+                Say "add receipt", "add per diem", or "add mileage" to add items first.
+
+            - kind: EndDialog
+              id: endDialog_EmptyCart
+              displayName: End Empty
+
+    # === DISPLAY CART FOR CONFIRMATION ===
+    - kind: SendActivity
+      id: sendActivity_CartPreview
+      displayName: Cart Preview
+      activity: |-
+        **Ready to Submit ({Global.CartCount} items)**
+
+        Email: {Global.RequesterEmail}
+        Department: {Global.DepartmentCode}
+
+        Cart:
+        {Global.CartJson}
+
+    # === CONFIRM SUBMISSION ===
+    - kind: Question
+      id: question_Confirm
+      displayName: Confirm Submit
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.Confirm
+      entity: BooleanPrebuiltEntity
+      prompt: Submit this expense report? (yes/no)
+
+    - kind: ConditionGroup
+      id: conditionGroup_ConfirmSubmit
+      displayName: Check Confirm
+      conditions:
+        - id: conditionItem_NotConfirmed
+          condition: =Topic.Confirm <> true
+          displayName: Not Confirmed
+          actions:
+            - kind: SendActivity
+              id: sendActivity_NotSubmitted
+              displayName: Not Submitted
+              activity: |-
+                OK, not submitted. Your cart is still saved.
+
+                Say "review" to see it again, or "submit" when ready.
+
+            - kind: EndDialog
+              id: endDialog_NotConfirmed
+              displayName: End Not Confirmed
+
+    # === CALL SUBMIT API ===
+    - kind: SendActivity
+      id: sendActivity_Submitting
+      displayName: Submitting
+      activity: Submitting your expense report...
+
+    - kind: SetVariable
+      id: setVariable_InitSubmitOk
+      displayName: Init Submit Ok
+      variable: Topic.SubmitOk
+      value: =false
+
+    - kind: SetVariable
+      id: setVariable_InitSubmitSent
+      displayName: Init Submit Sent
+      variable: Topic.SubmitSent
+      value: =false
+
+    - kind: BeginDialog
+      id: beginDialog_SubmitReport
+      displayName: Submit Report
+      dialog: new_agent.action.TravelExpense-SubmitReport
+      input:
+        binding:
+          requesterEmail: =Global.RequesterEmail
+          toEmail: ="itrenewal@core.coop"
+          ccRequester: =true
+          draftItemsJson: =Global.CartJson
+          receiptBundleFormat: ="pdf"
+      output:
+        binding:
+          ok: Topic.SubmitOk
+          sent: Topic.SubmitSent
+          toEmail: Topic.SubmitToEmail
+          lineCount: Topic.SubmitLineCount
+          amountTotal: Topic.SubmitAmountTotal
+          csvFilename: Topic.SubmitCsvFilename
+          emailError: Topic.SubmitEmailError
+
+    # === HANDLE SUBMIT RESULT ===
+    - kind: ConditionGroup
+      id: conditionGroup_HandleResult
+      displayName: Handle Result
+      conditions:
+        - id: conditionItem_Success
+          condition: =Topic.SubmitOk = true && Topic.SubmitSent = true
+          displayName: Success
+          actions:
+            - kind: SetVariable
+              id: setVariable_AmountFormatted
+              displayName: Format Amount
+              variable: Topic.AmountFormatted
+              value: =Concatenate("$", Text(Value(Topic.SubmitAmountTotal), "0.00"))
+
+            - kind: SendActivity
+              id: sendActivity_Success
+              displayName: Success
+              activity: |-
+                **Expense Report Submitted!**
+
+                - Sent to: {Topic.SubmitToEmail}
+                - CC: {Global.RequesterEmail}
+                - Items: {Topic.SubmitLineCount}
+                - Total: {Topic.AmountFormatted}
+                - File: {Topic.SubmitCsvFilename}
+
+                Your cart has been cleared.
+
+            # Clear cart after successful submit
+            - kind: SetVariable
+              id: setVariable_ClearCartAfterSubmit
+              displayName: Clear Cart After Submit
+              variable: Global.CartJson
+              value: ="[]"
+
+            - kind: SetVariable
+              id: setVariable_ClearCountAfterSubmit
+              displayName: Clear Count After Submit
+              variable: Global.CartCount
+              value: =0
+
+      elseActions:
+        - kind: SendActivity
+          id: sendActivity_Failed
+          displayName: Failed
+          activity: |-
+            **Submission Failed**
+
+            Error: {Topic.SubmitEmailError}
+
+            Your cart is still saved. Please try "submit" again or contact support.
+
+    - kind: EndDialog
+      id: endDialog_Main
+      displayName: End
+
+inputType: {}
+outputType: {}
