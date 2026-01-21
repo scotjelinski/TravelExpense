@@ -1,0 +1,368 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Add a per diem item to the expense cart.
+  Collects ZIP code, travel date, and days, then looks up GSA rate.
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  intent: {}
+  displayName: Main
+  actions:
+    # === COLLECT PER DIEM DETAILS ===
+    - kind: Question
+      id: question_ZipCode
+      displayName: Ask ZIP Code
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.ZipCodeInput
+      entity: StringPrebuiltEntity
+      prompt: What is the 5-digit ZIP code for the travel destination?
+
+    - kind: SetVariable
+      id: setVariable_NormalizeZip
+      displayName: Normalize ZIP
+      variable: Topic.ZipCode
+      value: =Coalesce(Match(Trim(Topic.ZipCodeInput), "[0-9]{5}").FullMatch, "")
+
+    # Validate ZIP
+    - kind: ConditionGroup
+      id: conditionGroup_ValidateZip
+      displayName: Validate ZIP
+      conditions:
+        - id: conditionItem_InvalidZip
+          condition: =!IsMatch(Topic.ZipCode, "^[0-9]{5}$")
+          displayName: Invalid ZIP
+          actions:
+            - kind: Question
+              id: question_ZipCodeRetry
+              displayName: Ask ZIP Retry
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.ZipCodeInput
+              entity: StringPrebuiltEntity
+              prompt: ZIP code must be 5 digits. Please enter the ZIP code (e.g., 80128):
+
+            - kind: SetVariable
+              id: setVariable_NormalizeZipRetry
+              displayName: Normalize ZIP Retry
+              variable: Topic.ZipCode
+              value: =Coalesce(Match(Trim(Topic.ZipCodeInput), "[0-9]{5}").FullMatch, "")
+
+    - kind: Question
+      id: question_TravelDate
+      displayName: Ask Travel Date
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.TravelDate
+      entity: StringPrebuiltEntity
+      prompt: |-
+        What is the travel date?
+        (e.g., 01/15/2026 or Jan 15)
+
+    - kind: Question
+      id: question_Days
+      displayName: Ask Days
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.Days
+      entity: NumberPrebuiltEntity
+      prompt: How many days of per diem?
+
+    # Validate days
+    - kind: ConditionGroup
+      id: conditionGroup_ValidateDays
+      displayName: Validate Days
+      conditions:
+        - id: conditionItem_InvalidDays
+          condition: =Value(Topic.Days) <= 0
+          displayName: Invalid Days
+          actions:
+            - kind: Question
+              id: question_DaysRetry
+              displayName: Ask Days Retry
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.Days
+              entity: NumberPrebuiltEntity
+              prompt: Days must be at least 1. How many days?
+
+    # === LOOKUP PER DIEM RATE ===
+    - kind: SendActivity
+      id: sendActivity_LookingUp
+      displayName: Looking Up Rate
+      activity: Looking up GSA per diem rate for ZIP {Topic.ZipCode}...
+
+    - kind: SetVariable
+      id: setVariable_InitLookupOk
+      displayName: Init Lookup Ok
+      variable: Topic.LookupOk
+      value: =false
+
+    - kind: SetVariable
+      id: setVariable_InitMieRate
+      displayName: Init MIE Rate
+      variable: Topic.MieRate
+      value: =Blank()
+
+    - kind: BeginDialog
+      id: beginDialog_PerDiemLookup
+      displayName: Per Diem Lookup
+      dialog: new_agent.action.TravelExpense-PerDiemLookup
+      input:
+        binding:
+          zipCode: =Topic.ZipCode
+          travelDate: =Topic.TravelDate
+      output:
+        binding:
+          ok: Topic.LookupOk
+          mieRate: Topic.MieRate
+          error: Topic.LookupError
+
+    # Handle lookup result
+    - kind: ConditionGroup
+      id: conditionGroup_HandleLookup
+      displayName: Handle Lookup Result
+      conditions:
+        - id: conditionItem_LookupFailed
+          condition: =Topic.LookupOk <> true || IsBlank(Topic.MieRate)
+          displayName: Lookup Failed
+          actions:
+            - kind: SendActivity
+              id: sendActivity_LookupFailed
+              displayName: Lookup Failed
+              activity: |-
+                Couldn't look up the per diem rate automatically.
+                Error: {Topic.LookupError}
+
+            - kind: Question
+              id: question_ManualRate
+              displayName: Ask Manual Rate
+              interruptionPolicy:
+                allowInterruption: false
+              variable: Topic.DailyRate
+              entity: NumberPrebuiltEntity
+              prompt: What is the daily per diem rate (USD)?
+
+      elseActions:
+        - kind: SetVariable
+          id: setVariable_DailyRateFromLookup
+          displayName: Daily Rate From Lookup
+          variable: Topic.DailyRate
+          value: =Value(Topic.MieRate)
+
+        - kind: SendActivity
+          id: sendActivity_RateFound
+          displayName: Rate Found
+          activity: "GSA M&IE rate: ${Topic.DailyRate}/day"
+
+    # === CALCULATE AMOUNT ===
+    - kind: SetVariable
+      id: setVariable_Amount
+      displayName: Calculate Amount
+      variable: Topic.Amount
+      value: =Value(Topic.Days) * Value(Topic.DailyRate)
+
+    # Validate amount
+    - kind: ConditionGroup
+      id: conditionGroup_ValidateAmount
+      displayName: Validate Amount
+      conditions:
+        - id: conditionItem_InvalidAmount
+          condition: =Value(Topic.Amount) <= 0
+          displayName: Invalid Amount
+          actions:
+            - kind: SendActivity
+              id: sendActivity_InvalidAmount
+              displayName: Invalid Amount
+              activity: Couldn't calculate a valid amount. Please try "add per diem" again.
+
+            - kind: EndDialog
+              id: endDialog_InvalidAmount
+              displayName: End Invalid
+
+    # === LOOKUP ACCOUNT CODE ===
+    - kind: SetVariable
+      id: setVariable_ActivityCode
+      displayName: Set Activity Code
+      variable: Topic.ActivityCode
+      value: ="700"
+
+    - kind: BeginDialog
+      id: beginDialog_ExpenseCodesLookup
+      displayName: Expense Codes Lookup
+      dialog: new_agent.action.TravelExpense-ExpenseCodesLookup
+      input:
+        binding:
+          departmentCode: =Global.DepartmentCode
+          activityCode: =Topic.ActivityCode
+      output:
+        binding:
+          matches: Topic.Matches
+
+    # Handle account selection
+    - kind: ConditionGroup
+      id: conditionGroup_HandleMatches
+      displayName: Handle Matches
+      conditions:
+        - id: conditionItem_NoMatches
+          condition: =CountRows(Topic.Matches) = 0
+          displayName: No Matches
+          actions:
+            - kind: SendActivity
+              id: sendActivity_NoMatches
+              displayName: No Matches
+              activity: No account codes found for Department {Global.DepartmentCode}. Try "reset" to change department.
+
+            - kind: EndDialog
+              id: endDialog_NoMatches
+              displayName: End No Matches
+
+        - id: conditionItem_SingleMatch
+          condition: =CountRows(Topic.Matches) = 1
+          displayName: Single Match
+          actions:
+            - kind: SetVariable
+              id: setVariable_AccountSingle
+              displayName: Account Single
+              variable: Topic.AccountCode
+              value: =First(Topic.Matches).accountCode
+
+      elseActions:
+        - kind: SetVariable
+          id: setVariable_MatchesList
+          displayName: Build Matches List
+          variable: Topic.MatchesList
+          value: =Concat(Topic.Matches, ThisRecord.accountCode & " - " & ThisRecord.description & Char(10))
+
+        - kind: SendActivity
+          id: sendActivity_MultipleMatches
+          displayName: Multiple Matches
+          activity: |-
+            Multiple account codes found:
+            {Topic.MatchesList}
+
+        - kind: Question
+          id: question_AccountCode
+          displayName: Ask Account Code
+          interruptionPolicy:
+            allowInterruption: false
+          variable: Topic.AccountCode
+          entity: StringPrebuiltEntity
+          prompt: Which account code?
+
+    # === BUILD SUMMARY ===
+    - kind: SetVariable
+      id: setVariable_Reference
+      displayName: Build Reference
+      variable: Topic.Reference
+      value: =Concatenate("PerDiem ", Topic.ZipCode, " ", Topic.TravelDate, " x", Text(Value(Topic.Days), "0"))
+
+    - kind: SetVariable
+      id: setVariable_AmountFormatted
+      displayName: Format Amount
+      variable: Topic.AmountFormatted
+      value: =Concatenate("$", Text(Value(Topic.Amount), "0.00"))
+
+    - kind: SetVariable
+      id: setVariable_DailyRateFormatted
+      displayName: Format Daily Rate
+      variable: Topic.DailyRateFormatted
+      value: =Concatenate("$", Text(Value(Topic.DailyRate), "0.00"))
+
+    - kind: SendActivity
+      id: sendActivity_Summary
+      displayName: Show Summary
+      activity: |-
+        **Per Diem Summary:**
+        - ZIP: {Topic.ZipCode}
+        - Date: {Topic.TravelDate}
+        - Days: {Topic.Days}
+        - Daily Rate: {Topic.DailyRateFormatted}
+        - Total: {Topic.AmountFormatted}
+        - Department: {Global.DepartmentCode}
+        - Account: {Topic.AccountCode}
+
+    # === CONFIRM ADD ===
+    - kind: Question
+      id: question_Confirm
+      displayName: Confirm Add
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.Confirm
+      entity: BooleanPrebuiltEntity
+      prompt: Add this to your cart? (yes/no)
+
+    - kind: ConditionGroup
+      id: conditionGroup_AddToCart
+      displayName: Add To Cart
+      conditions:
+        - id: conditionItem_Confirmed
+          condition: =Topic.Confirm = true
+          displayName: Confirmed
+          actions:
+            - kind: SetVariable
+              id: setVariable_ReferenceSafe
+              displayName: Safe Reference
+              variable: Topic.ReferenceSafe
+              value: =Substitute(Substitute(Substitute(Topic.Reference, Char(34), "'"), Char(10), " "), Char(13), " ")
+
+            - kind: SetVariable
+              id: setVariable_NewItemJson
+              displayName: New Item JSON
+              variable: Topic.NewItemJson
+              value: |-
+                =Concatenate(
+                  "{",
+                  Char(34), "type", Char(34), ":", Char(34), "PerDiem", Char(34), ",",
+                  Char(34), "zipCode", Char(34), ":", Char(34), Topic.ZipCode, Char(34), ",",
+                  Char(34), "travelDate", Char(34), ":", Char(34), Topic.TravelDate, Char(34), ",",
+                  Char(34), "days", Char(34), ":", Text(Value(Topic.Days), "0"), ",",
+                  Char(34), "dailyRate", Char(34), ":", Text(Value(Topic.DailyRate), "0.00"), ",",
+                  Char(34), "departmentCode", Char(34), ":", Char(34), Global.DepartmentCode, Char(34), ",",
+                  Char(34), "activityCode", Char(34), ":", Char(34), Topic.ActivityCode, Char(34), ",",
+                  Char(34), "accountCode", Char(34), ":", Char(34), Topic.AccountCode, Char(34), ",",
+                  Char(34), "reference", Char(34), ":", Char(34), Topic.ReferenceSafe, Char(34), ",",
+                  Char(34), "amount", Char(34), ":", Text(Value(Topic.Amount), "0.00"),
+                  "}"
+                )
+
+            - kind: SetVariable
+              id: setVariable_AppendToCart
+              displayName: Append To Cart
+              variable: Global.CartJson
+              value: |-
+                =If(
+                  IsBlank(Global.CartJson) || Global.CartJson = "[]",
+                  Concatenate("[", Topic.NewItemJson, "]"),
+                  Concatenate(Left(Global.CartJson, Len(Global.CartJson) - 1), ",", Topic.NewItemJson, "]")
+                )
+
+            - kind: SetVariable
+              id: setVariable_IncrementCount
+              displayName: Increment Cart Count
+              variable: Global.CartCount
+              value: =If(IsBlank(Global.CartCount), 0, Global.CartCount) + 1
+
+            - kind: SendActivity
+              id: sendActivity_Added
+              displayName: Item Added
+              activity: |-
+                Added to cart. ({Global.CartCount} items)
+
+                Say "add receipt", "add per diem", "add mileage", "review", or "submit".
+
+      elseActions:
+        - kind: SendActivity
+          id: sendActivity_NotAdded
+          displayName: Not Added
+          activity: |-
+            OK, not added.
+
+            Say "add per diem" to try again.
+
+    - kind: EndDialog
+      id: endDialog_Main
+      displayName: End
+
+inputType: {}
+outputType: {}

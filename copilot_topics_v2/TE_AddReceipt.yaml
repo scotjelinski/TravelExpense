@@ -1,0 +1,255 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Add a receipt item to the expense cart.
+  Collects category, amount, description, then looks up account code.
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  intent: {}
+  displayName: Main
+  actions:
+    # === COLLECT RECEIPT DETAILS ===
+    - kind: Question
+      id: question_Category
+      displayName: Ask Category
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.Category
+      entity: StringPrebuiltEntity
+      prompt: |-
+        What type of expense is this?
+        (e.g., hotel, airfare, parking, meal, other)
+
+    - kind: Question
+      id: question_Amount
+      displayName: Ask Amount
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.Amount
+      entity: NumberPrebuiltEntity
+      prompt: What is the amount in USD?
+
+    - kind: Question
+      id: question_Description
+      displayName: Ask Description
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.Description
+      entity: StringPrebuiltEntity
+      prompt: |-
+        Short description for this expense?
+        (e.g., "Hotel - Denver 2 nights")
+
+    # === DETERMINE ACTIVITY CODE ===
+    - kind: SetVariable
+      id: setVariable_CategoryLower
+      displayName: Category Lower
+      variable: Topic.CategoryLower
+      value: =Lower(Trim(Topic.Category) & " " & Trim(Topic.Description))
+
+    - kind: SetVariable
+      id: setVariable_ActivityCode
+      displayName: Determine Activity Code
+      variable: Topic.ActivityCode
+      value: |-
+        =If(
+          Find("wellness", Topic.CategoryLower) > 0, "790",
+          If(
+            Find("train", Topic.CategoryLower) > 0 || Find("conference", Topic.CategoryLower) > 0 || Find("education", Topic.CategoryLower) > 0, "770",
+            If(
+              Find("meal", Topic.CategoryLower) > 0 || Find("lunch", Topic.CategoryLower) > 0 || Find("dinner", Topic.CategoryLower) > 0, "710",
+              "700"
+            )
+          )
+        )
+
+    # === LOOKUP ACCOUNT CODE ===
+    - kind: SetVariable
+      id: setVariable_InitMatches
+      displayName: Init Matches
+      variable: Topic.Matches
+      value: =Table()
+
+    - kind: BeginDialog
+      id: beginDialog_ExpenseCodesLookup
+      displayName: Expense Codes Lookup
+      dialog: new_agent.action.TravelExpense-ExpenseCodesLookup
+      input:
+        binding:
+          departmentCode: =Global.DepartmentCode
+          activityCode: =Topic.ActivityCode
+      output:
+        binding:
+          matches: Topic.Matches
+
+    # === HANDLE ACCOUNT CODE SELECTION ===
+    - kind: ConditionGroup
+      id: conditionGroup_HandleMatches
+      displayName: Handle Matches
+      conditions:
+        # No matches found
+        - id: conditionItem_NoMatches
+          condition: =CountRows(Topic.Matches) = 0
+          displayName: No Matches
+          actions:
+            - kind: SendActivity
+              id: sendActivity_NoMatches
+              displayName: No Matches
+              activity: |-
+                No account codes found for Department {Global.DepartmentCode} with Activity {Topic.ActivityCode}.
+
+                Try "reset" to change your department, or use a different category.
+
+            - kind: EndDialog
+              id: endDialog_NoMatches
+              displayName: End No Matches
+
+        # Single match - auto-select
+        - id: conditionItem_SingleMatch
+          condition: =CountRows(Topic.Matches) = 1
+          displayName: Single Match
+          actions:
+            - kind: SetVariable
+              id: setVariable_AccountSingle
+              displayName: Account Single
+              variable: Topic.AccountCode
+              value: =First(Topic.Matches).accountCode
+
+        # Multiple matches - ask user
+      elseActions:
+        - kind: SetVariable
+          id: setVariable_MatchesList
+          displayName: Build Matches List
+          variable: Topic.MatchesList
+          value: =Concat(Topic.Matches, ThisRecord.accountCode & " - " & ThisRecord.description & Char(10))
+
+        - kind: SendActivity
+          id: sendActivity_MultipleMatches
+          displayName: Multiple Matches
+          activity: |-
+            Multiple account codes found:
+            {Topic.MatchesList}
+
+        - kind: Question
+          id: question_AccountCode
+          displayName: Ask Account Code
+          interruptionPolicy:
+            allowInterruption: false
+          variable: Topic.AccountCode
+          entity: StringPrebuiltEntity
+          prompt: Which account code do you want to use?
+
+        - kind: SetVariable
+          id: setVariable_NormalizeAccount
+          displayName: Normalize Account
+          variable: Topic.AccountCode
+          value: =Trim(Topic.AccountCode)
+
+    # === BUILD ITEM AND SHOW SUMMARY ===
+    - kind: SetVariable
+      id: setVariable_Reference
+      displayName: Build Reference
+      variable: Topic.Reference
+      value: =Left(Trim(If(IsBlank(Topic.Description), Topic.Category, Topic.Description)), 40)
+
+    - kind: SetVariable
+      id: setVariable_AmountFormatted
+      displayName: Format Amount
+      variable: Topic.AmountFormatted
+      value: =Concatenate("$", Text(Value(Topic.Amount), "0.00"))
+
+    - kind: SendActivity
+      id: sendActivity_Summary
+      displayName: Show Summary
+      activity: |-
+        **Receipt Summary:**
+        - Type: {Topic.Category}
+        - Description: {Topic.Reference}
+        - Amount: {Topic.AmountFormatted}
+        - Department: {Global.DepartmentCode}
+        - Activity: {Topic.ActivityCode}
+        - Account: {Topic.AccountCode}
+
+    # === CONFIRM ADD ===
+    - kind: Question
+      id: question_Confirm
+      displayName: Confirm Add
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.Confirm
+      entity: BooleanPrebuiltEntity
+      prompt: Add this to your cart? (yes/no)
+
+    - kind: ConditionGroup
+      id: conditionGroup_AddToCart
+      displayName: Add To Cart
+      conditions:
+        - id: conditionItem_Confirmed
+          condition: =Topic.Confirm = true
+          displayName: Confirmed
+          actions:
+            # Build JSON for this item
+            - kind: SetVariable
+              id: setVariable_ReferenceSafe
+              displayName: Safe Reference
+              variable: Topic.ReferenceSafe
+              value: =Substitute(Substitute(Substitute(Topic.Reference, Char(34), "'"), Char(10), " "), Char(13), " ")
+
+            - kind: SetVariable
+              id: setVariable_NewItemJson
+              displayName: New Item JSON
+              variable: Topic.NewItemJson
+              value: |-
+                =Concatenate(
+                  "{",
+                  Char(34), "type", Char(34), ":", Char(34), "Receipt", Char(34), ",",
+                  Char(34), "category", Char(34), ":", Char(34), Topic.Category, Char(34), ",",
+                  Char(34), "departmentCode", Char(34), ":", Char(34), Global.DepartmentCode, Char(34), ",",
+                  Char(34), "activityCode", Char(34), ":", Char(34), Topic.ActivityCode, Char(34), ",",
+                  Char(34), "accountCode", Char(34), ":", Char(34), Topic.AccountCode, Char(34), ",",
+                  Char(34), "reference", Char(34), ":", Char(34), Topic.ReferenceSafe, Char(34), ",",
+                  Char(34), "amount", Char(34), ":", Text(Value(Topic.Amount), "0.00"),
+                  "}"
+                )
+
+            # Append to cart
+            - kind: SetVariable
+              id: setVariable_AppendToCart
+              displayName: Append To Cart
+              variable: Global.CartJson
+              value: |-
+                =If(
+                  IsBlank(Global.CartJson) || Global.CartJson = "[]",
+                  Concatenate("[", Topic.NewItemJson, "]"),
+                  Concatenate(Left(Global.CartJson, Len(Global.CartJson) - 1), ",", Topic.NewItemJson, "]")
+                )
+
+            - kind: SetVariable
+              id: setVariable_IncrementCount
+              displayName: Increment Cart Count
+              variable: Global.CartCount
+              value: =If(IsBlank(Global.CartCount), 0, Global.CartCount) + 1
+
+            - kind: SendActivity
+              id: sendActivity_Added
+              displayName: Item Added
+              activity: |-
+                Added to cart. ({Global.CartCount} items)
+
+                Say "add receipt", "add per diem", "add mileage", "review", or "submit".
+
+      elseActions:
+        - kind: SendActivity
+          id: sendActivity_NotAdded
+          displayName: Not Added
+          activity: |-
+            OK, not added.
+
+            Say "add receipt" to try again.
+
+    - kind: EndDialog
+      id: endDialog_Main
+      displayName: End
+
+inputType: {}
+outputType: {}

@@ -1,0 +1,121 @@
+kind: AdaptiveDialog
+modelDescription: |-
+  Review the current expense cart and optionally clear it.
+beginDialog:
+  kind: OnRecognizedIntent
+  id: main
+  intent: {}
+  displayName: Main
+  actions:
+    # === CHECK IF CART IS EMPTY ===
+    - kind: ConditionGroup
+      id: conditionGroup_CheckCart
+      displayName: Check Cart
+      conditions:
+        - id: conditionItem_EmptyCart
+          condition: =IsBlank(Global.CartJson) || Global.CartJson = "[]" || Global.CartCount <= 0
+          displayName: Cart Empty
+          actions:
+            - kind: SendActivity
+              id: sendActivity_EmptyCart
+              displayName: Empty Cart
+              activity: |-
+                Your cart is empty.
+
+                Say "add receipt", "add per diem", or "add mileage" to add items.
+
+            - kind: EndDialog
+              id: endDialog_EmptyCart
+              displayName: End Empty
+
+    # === DISPLAY CART SUMMARY ===
+    - kind: SendActivity
+      id: sendActivity_CartSummary
+      displayName: Cart Summary
+      activity: |-
+        **Your Cart ({Global.CartCount} items)**
+
+        Email: {Global.RequesterEmail}
+        Department: {Global.DepartmentCode}
+
+        Items (JSON):
+        {Global.CartJson}
+
+    # === ASK FOR ACTION ===
+    - kind: Question
+      id: question_Action
+      displayName: Ask Action
+      interruptionPolicy:
+        allowInterruption: false
+      variable: Topic.Action
+      entity: StringPrebuiltEntity
+      prompt: |-
+        What would you like to do?
+        - "submit" - Submit the expense report
+        - "clear" - Clear the cart
+        - "done" - Keep the cart as is
+
+    - kind: SetVariable
+      id: setVariable_ActionLower
+      displayName: Normalize Action
+      variable: Topic.ActionLower
+      value: =Lower(Trim(Topic.Action))
+
+    # === HANDLE ACTIONS ===
+    - kind: ConditionGroup
+      id: conditionGroup_HandleAction
+      displayName: Handle Action
+      conditions:
+        # Clear cart
+        - id: conditionItem_Clear
+          condition: =Find("clear", Topic.ActionLower) > 0
+          displayName: Clear Cart
+          actions:
+            - kind: SetVariable
+              id: setVariable_ClearCart
+              displayName: Clear Cart
+              variable: Global.CartJson
+              value: ="[]"
+
+            - kind: SetVariable
+              id: setVariable_ClearCount
+              displayName: Clear Count
+              variable: Global.CartCount
+              value: =0
+
+            - kind: SendActivity
+              id: sendActivity_Cleared
+              displayName: Cleared
+              activity: |-
+                Cart cleared.
+
+                Say "add receipt", "add per diem", or "add mileage" to start over.
+
+        # Submit
+        - id: conditionItem_Submit
+          condition: =Find("submit", Topic.ActionLower) > 0 || Find("send", Topic.ActionLower) > 0
+          displayName: Submit
+          actions:
+            - kind: BeginDialog
+              id: beginDialog_Submit
+              displayName: Go To Submit
+              dialog: new_agent.topic.TE_Submit
+              input: {}
+              output: {}
+
+        # Done / keep
+      elseActions:
+        - kind: SendActivity
+          id: sendActivity_Kept
+          displayName: Cart Kept
+          activity: |-
+            OK, your cart is unchanged.
+
+            Say "add receipt", "add per diem", "add mileage", or "submit".
+
+    - kind: EndDialog
+      id: endDialog_Main
+      displayName: End
+
+inputType: {}
+outputType: {}

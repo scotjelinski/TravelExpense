@@ -1,6 +1,33 @@
 # Travel Expense (Copilot Studio) — Agent Handoff
 
-This repo implements a **Teams Copilot Studio** travel-expense “cart” experience: users add **Receipt / Per Diem / Mileage** items, the bot performs deterministic **GL coding** (dept/activity/account + optional override), then submits by email via Azure Functions.
+This repo implements a **Teams Copilot Studio** travel-expense "cart" experience: users add **Receipt / Per Diem / Mileage** items, the bot performs deterministic **GL coding** (dept/activity/account + optional override), then submits by email via Azure Functions.
+
+## Topics - v1 vs v2
+
+This repo contains two versions of the Copilot Studio topics:
+
+| Folder | Version | Files | Description |
+|--------|---------|-------|-------------|
+| `copilot_topics/` | v1 (original) | 10+ files | Complex with many interdependencies |
+| `copilot_topics_v2/` | v2 (refactored) | 6 files | **Recommended** - Simplified, focused on core features |
+
+### v2 Topics (Recommended)
+
+The refactored v2 topics provide the core features:
+1. **Collect email** - Ask user for CORE email or use signed-in email
+2. **Get department code** - Auto-lookup via OrgChart API or manual entry
+3. **Build cart** - Add per diem, mileage, or receipt items
+4. **Submit** - Submit expense report via API
+
+**v2 Topic Files:**
+- `TE_Main.yaml` - Entry point with email/dept collection and routing
+- `TE_AddReceipt.yaml` - Add receipt expense
+- `TE_AddPerDiem.yaml` - Add per diem (with GSA rate lookup)
+- `TE_AddMileage.yaml` - Add mileage expense
+- `TE_ReviewCart.yaml` - Review and clear cart
+- `TE_Submit.yaml` - Submit expense report
+
+See `copilot_topics_v2/README.md` for setup instructions.
 
 ## Source of truth (important)
 
@@ -12,9 +39,17 @@ If something works locally but not in Azure, verify you updated/published the **
 
 ## Core components
 
-**Copilot Studio Topics (YAML)**
+**Copilot Studio Topics - v2 (Recommended)**
+- `copilot_topics_v2/TE_Main.yaml`: entry + email/dept collection + routing
+- `copilot_topics_v2/TE_AddReceipt.yaml`: receipt intake + account code lookup
+- `copilot_topics_v2/TE_AddPerDiem.yaml`: per diem intake + GSA rate lookup
+- `copilot_topics_v2/TE_AddMileage.yaml`: mileage intake + account code lookup
+- `copilot_topics_v2/TE_ReviewCart.yaml`: cart review + clear
+- `copilot_topics_v2/TE_Submit.yaml`: submit via `POST /api/submit-report`
+
+**Copilot Studio Topics - v1 (Legacy)**
 - `copilot_topics/TE_0_Router.yaml`: entry + initializes globals (includes `Global.ApiBaseUrl`)
-- `copilot_topics/TE_1_SetIdentity.yaml`: “change department” flow; uses Teams email when available and supports override
+- `copilot_topics/TE_1_SetIdentity.yaml`: "change department" flow; uses Teams email when available and supports override
 - `copilot_topics/TE_2_AddReceipt.yaml`: receipt intake + `GET /api/expense-codes`
 - `copilot_topics/TE_3_AddPerDiem.yaml`: per diem intake + `GET /api/per-diem-lookup` (fallback to manual daily rate)
 - `copilot_topics/TE_4_AddMileage.yaml`: mileage intake + `GET /api/expense-codes`
