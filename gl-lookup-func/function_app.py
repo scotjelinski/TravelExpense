@@ -18,6 +18,8 @@ from PIL import Image
 import requests
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings
+from azure.ai.documentintelligence import DocumentIntelligenceClient
+from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
 
 # Default app auth level can stay FUNCTION if you want Function-key auth.
 # If you instead want Entra/EasyAuth (Managed Identity), set individual routes to
@@ -29,6 +31,35 @@ APP_VERSION = "2026-01-07-receipts-upload-v1"
 CSV_PATH = Path(__file__).with_name("expense_codes.csv")
 _ROWS = None
 _DEPT_ENTRIES = None
+_DEPT_EMAIL_OVERRIDES = None
+
+
+def _get_first_str(obj: dict, *keys: str, default: str = "") -> str:
+    """
+    Extract the first non-empty string value from a dict using multiple possible key names.
+    Handles case-insensitive key matching and returns the default if no value is found.
+    """
+    if not obj or not isinstance(obj, dict):
+        return default
+    # Build a lowercase key map for case-insensitive lookup
+    lower_map = {str(k).lower(): v for k, v in obj.items()}
+    for key in keys:
+        # Try exact match first
+        if key in obj:
+            val = obj[key]
+            if val is not None:
+                s = str(val).strip()
+                if s:
+                    return s
+        # Try case-insensitive match
+        lower_key = str(key).lower()
+        if lower_key in lower_map:
+            val = lower_map[lower_key]
+            if val is not None:
+                s = str(val).strip()
+                if s:
+                    return s
+    return default
 
 
 def _today_in_configured_tz() -> date:
@@ -144,6 +175,48 @@ def _load_department_entries():
 
     _DEPT_ENTRIES = entries
     return _DEPT_ENTRIES
+
+
+def _load_dept_email_overrides() -> dict:
+    """
+    Optional production-safe escape hatch for OrgChart data that does not uniquely
+    identify a department code (e.g., multiple cost centers share the same orgchart
+    department name).
+
+    Configure with app setting ORGCHART_DEPT_EMAIL_OVERRIDES as JSON:
+      {"user@core.coop":"175", "other@core.coop":"180"}
+    """
+    global _DEPT_EMAIL_OVERRIDES
+    if _DEPT_EMAIL_OVERRIDES is not None:
+        return _DEPT_EMAIL_OVERRIDES
+
+    raw = (os.getenv("ORGCHART_DEPT_EMAIL_OVERRIDES") or "").strip()
+    overrides = {}
+    if raw:
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    email = str(k or "").strip().lower()
+                    code = str(v or "").strip()
+                    if email and code:
+                        overrides[email] = code
+        except Exception:
+            # If parsing fails, treat as "no overrides" rather than failing requests.
+            overrides = {}
+
+    _DEPT_EMAIL_OVERRIDES = overrides
+    return _DEPT_EMAIL_OVERRIDES
+
+
+def _department_name_for_code(department_code: str) -> str:
+    department_code = str(department_code or "").strip()
+    if not department_code:
+        return ""
+    for e in _load_department_entries():
+        if e.get("departmentCode") == department_code:
+            return str(e.get("departmentName") or "").strip()
+    return ""
 
 
 def _map_department_name_to_code(department_name: str):
@@ -636,6 +709,95 @@ def _find_mie_rate(obj) -> Optional[float]:
     return None
 
 
+_US_STATES = {
+    "AL": "ALABAMA", "AK": "ALASKA", "AZ": "ARIZONA", "AR": "ARKANSAS", "CA": "CALIFORNIA",
+    "CO": "COLORADO", "CT": "CONNECTICUT", "DE": "DELAWARE", "FL": "FLORIDA", "GA": "GEORGIA",
+    "HI": "HAWAII", "ID": "IDAHO", "IL": "ILLINOIS", "IN": "INDIANA", "IA": "IOWA",
+    "KS": "KANSAS", "KY": "KENTUCKY", "LA": "LOUISIANA", "ME": "MAINE", "MD": "MARYLAND",
+    "MA": "MASSACHUSETTS", "MI": "MICHIGAN", "MN": "MINNESOTA", "MS": "MISSISSIPPI",
+    "MO": "MISSOURI", "MT": "MONTANA", "NE": "NEBRASKA", "NV": "NEVADA", "NH": "NEW HAMPSHIRE",
+    "NJ": "NEW JERSEY", "NM": "NEW MEXICO", "NY": "NEW YORK", "NC": "NORTH CAROLINA",
+    "ND": "NORTH DAKOTA", "OH": "OHIO", "OK": "OKLAHOMA", "OR": "OREGON", "PA": "PENNSYLVANIA",
+    "RI": "RHODE ISLAND", "SC": "SOUTH CAROLINA", "SD": "SOUTH DAKOTA", "TN": "TENNESSEE",
+    "TX": "TEXAS", "UT": "UTAH", "VT": "VERMONT", "VA": "VIRGINIA", "WA": "WASHINGTON",
+    "WV": "WEST VIRGINIA", "WI": "WISCONSIN", "WY": "WYOMING", "DC": "DISTRICT OF COLUMBIA",
+}
+_STATE_NAME_TO_ABBR = {v: k for k, v in _US_STATES.items()}
+
+
+def _parse_city_state(raw: str) -> tuple[Optional[str], Optional[str]]:
+    """Parse 'City, ST' or 'City ST' or 'City, State Name' into (city, state_abbr)."""
+    s = raw.strip()
+    if not s:
+        return None, None
+
+    # Try "City, ST" or "City, State Name"
+    parts = None
+    if "," in s:
+        parts = [p.strip() for p in s.split(",", 1)]
+    else:
+        # Try splitting on last whitespace-separated token as state
+        tokens = s.rsplit(None, 1)
+        if len(tokens) == 2:
+            parts = tokens
+
+    if not parts or len(parts) < 2 or not parts[0] or not parts[1]:
+        return None, None
+
+    city = parts[0].strip()
+    state_raw = parts[1].strip().upper()
+
+    # Direct abbreviation match
+    if state_raw in _US_STATES:
+        return city, state_raw
+
+    # Full state name match
+    abbr = _STATE_NAME_TO_ABBR.get(state_raw)
+    if abbr:
+        return city, abbr
+
+    return None, None
+
+
+def _gsa_per_diem_city_state_lookup(city: str, state: str, travel_date: Optional[date], debug: bool = False) -> tuple[Optional[dict], Optional[str]]:
+    """Look up GSA per diem rate by city and state abbreviation."""
+    api_key = (os.getenv("GSA_API_KEY") or "").strip()
+    if not api_key:
+        return None, "GSA_API_KEY is not configured."
+
+    base_url = (os.getenv("GSA_PER_DIEM_BASE_URL") or "https://api.gsa.gov/travel/perdiem/v2").strip().rstrip("/")
+    dt = travel_date or _today_in_configured_tz()
+    fiscal_year = dt.year + 1 if dt.month >= 10 else dt.year
+
+    headers = {"Accept": "application/json", "x-api-key": api_key}
+    params = {"api_key": api_key}
+
+    city_norm = city.upper().replace(".", " ").replace("'", " ").replace("-", " ")
+    city_norm = " ".join(city_norm.split())
+    city_enc = city_norm.replace(" ", "%20")
+    city_url = f"{base_url}/rates/city/{city_enc}/state/{state.upper()}/year/{fiscal_year}"
+
+    attempts = []
+    try:
+        resp = requests.get(city_url, headers=headers, params=params, timeout=15)
+    except Exception as e:
+        return None, f"GSA per diem request failed: {e}"
+
+    if debug:
+        attempts.append({"url": city_url, "status": resp.status_code})
+
+    if resp.status_code == 200:
+        try:
+            body = resp.json()
+            if debug:
+                body = {"_debug": {"attempts": attempts, "city": city, "state": state}, "data": body}
+            return body, None
+        except Exception:
+            return None, "GSA per diem returned invalid JSON."
+
+    return None, f"GSA per diem lookup failed for {city}, {state} (HTTP {resp.status_code})."
+
+
 def _gsa_per_diem_lookup(zip_code: str, travel_date: Optional[date], debug: bool = False) -> tuple[Optional[dict], Optional[str]]:
     api_key = (os.getenv("GSA_API_KEY") or "").strip()
     if not api_key:
@@ -763,7 +925,21 @@ def orgchart_lookup(req: func.HttpRequest) -> func.HttpResponse:
     job_title = (doc.get("jobTitle") or doc.get("title") or chunk_obj.get("JobTitle") or chunk_obj.get("jobTitle") or "")
     department_name = (doc.get("department") or doc.get("Department") or chunk_obj.get("Department") or chunk_obj.get("department") or "")
 
-    dept_code, dept_name_canonical, match_type, candidates = _map_department_name_to_code(department_name)
+    # If OrgChart doesn't provide a unique department code, allow an email-level override.
+    # This is intentionally optional and non-fatal if misconfigured.
+    dept_override_used = False
+    dept_override_code = ""
+    resolved_email_lc = str(resolved_email).strip().lower()
+    overrides = _load_dept_email_overrides()
+    if resolved_email_lc and overrides and resolved_email_lc in overrides:
+        dept_override_used = True
+        dept_override_code = overrides.get(resolved_email_lc) or ""
+        dept_code = str(dept_override_code).strip()
+        dept_name_canonical = _department_name_for_code(dept_code) or str(department_name).strip()
+        match_type = "exact"
+        candidates = []
+    else:
+        dept_code, dept_name_canonical, match_type, candidates = _map_department_name_to_code(department_name)
 
     payload = {
         "ok": True,
@@ -778,7 +954,10 @@ def orgchart_lookup(req: func.HttpRequest) -> func.HttpResponse:
         "departmentCandidates": candidates,
     }
     if debug:
-        payload["debug"] = {"attempts": attempts}
+        debug_obj = {"attempts": attempts}
+        if dept_override_used:
+            debug_obj["deptOverride"] = {"email": resolved_email_lc, "departmentCode": dept_override_code}
+        payload["debug"] = debug_obj
     return func.HttpResponse(json.dumps(payload), mimetype="application/json")
 
 
@@ -821,7 +1000,19 @@ def orgchart_lookup_upn(req: func.HttpRequest) -> func.HttpResponse:
     display_name = _get_first_str(chunk_obj, "DisplayName", "displayName", default="")
     job_title = _get_first_str(chunk_obj, "JobTitle", "jobTitle", default="")
     department_name = _get_first_str(chunk_obj, "Department", "department", default="")
-    department_code, department_name_mapped, match_type, candidates = _map_department_to_code(department_name)
+    dept_override_used = False
+    dept_override_code = ""
+    upn_lc = str(upn).strip().lower()
+    overrides = _load_dept_email_overrides()
+    if upn_lc and overrides and upn_lc in overrides:
+        dept_override_used = True
+        dept_override_code = overrides.get(upn_lc) or ""
+        department_code = str(dept_override_code).strip()
+        department_name_mapped = _department_name_for_code(department_code) or str(department_name).strip()
+        match_type = "exact"
+        candidates = []
+    else:
+        department_code, department_name_mapped, match_type, candidates = _map_department_name_to_code(department_name)
 
     payload = {
         "ok": True,
@@ -836,7 +1027,10 @@ def orgchart_lookup_upn(req: func.HttpRequest) -> func.HttpResponse:
         "departmentCandidates": candidates,
     }
     if debug:
-        payload["debug"] = {"attempts": attempts}
+        debug_obj = {"attempts": attempts}
+        if dept_override_used:
+            debug_obj["deptOverride"] = {"email": upn_lc, "departmentCode": dept_override_code}
+        payload["debug"] = debug_obj
     return func.HttpResponse(json.dumps(payload), mimetype="application/json")
 
 
@@ -886,31 +1080,11 @@ def per_diem_lookup(req: func.HttpRequest) -> func.HttpResponse:
         raw_body_text = ""
 
     zip_code_raw = (
-        _param_ci("zipCode", "zip", "zipcode", "zip_code")
-        or _body_ci("zipCode", "zip", "zipcode", "zip_code")
+        _param_ci("zipCode", "zip", "zipcode", "zip_code", "location")
+        or _body_ci("zipCode", "zip", "zipcode", "zip_code", "location")
         or raw_body_text
         or ""
     ).strip()
-    # Copilot/connector payloads sometimes coerce strings into numbers or include punctuation (e.g. "80128.0", "80128-1234").
-    # Extract digits and take the first 5.
-    zip_digits = re.sub(r"\D", "", zip_code_raw or "")
-    zip_code = (zip_digits[:5] if zip_digits else "").strip()
-    if not re.fullmatch(r"\d{5}", zip_code or ""):
-        try:
-            logging.info(
-                "per-diem-lookup invalid zip: url=%r zip_raw=%r params_keys=%s body_keys=%s body_len=%s",
-                getattr(req, "url", ""),
-                zip_code_raw,
-                sorted(list(params.keys())) if params else [],
-                sorted(list(body.keys())) if body else [],
-                len(raw_body_text or ""),
-            )
-        except Exception:
-            pass
-        return func.HttpResponse(
-            json.dumps({"ok": False, "error": "zipCode must be a 5-digit ZIP"}),
-            mimetype="application/json",
-        )
 
     travel_date = _parse_iso_date(
         (_param_ci("travelDate", "date", "travel_date") or _body_ci("travelDate", "date", "travel_date")).strip()
@@ -918,7 +1092,31 @@ def per_diem_lookup(req: func.HttpRequest) -> func.HttpResponse:
 
     debug = str(req.params.get('debug') or req.params.get('includeDebug') or '').strip().lower() in ('1','true','yes')
 
-    raw, err = _gsa_per_diem_lookup(zip_code, travel_date, debug=debug)
+    # Try to extract a 5-digit ZIP first.
+    zip_digits = re.sub(r"\D", "", zip_code_raw or "")
+    zip_code = (zip_digits[:5] if zip_digits else "").strip()
+
+    raw = None
+    err = None
+
+    if re.fullmatch(r"\d{5}", zip_code or ""):
+        # Standard ZIP lookup
+        raw, err = _gsa_per_diem_lookup(zip_code, travel_date, debug=debug)
+    else:
+        # Try to parse as "City, State" or "City State"
+        city_raw = zip_code_raw.strip()
+        if not city_raw:
+            return func.HttpResponse(
+                json.dumps({"ok": False, "error": "Provide a 5-digit ZIP or City, State (e.g. Denver, CO)."}),
+                mimetype="application/json",
+            )
+        city_name, state_abbr = _parse_city_state(city_raw)
+        if not city_name or not state_abbr:
+            return func.HttpResponse(
+                json.dumps({"ok": False, "error": f"Could not parse location '{city_raw}'. Use a 5-digit ZIP or City, State (e.g. Denver, CO)."}),
+                mimetype="application/json",
+            )
+        raw, err = _gsa_per_diem_city_state_lookup(city_name, state_abbr, travel_date, debug=debug)
     if err:
         return func.HttpResponse(
             json.dumps({"ok": False, "error": err}),
@@ -1084,6 +1282,21 @@ def _make_reference(base_reference: str, original_account_code: str, gl_override
     return ref[:40]
 
 
+_INVOICE_PREFIX_MAP = {
+    "receipt": "EXP",
+    "boots": "EXP",
+    "perdiem": "PER DIEM",
+    "mileage": "MIL",
+}
+
+
+def _invoice_number(item_type: str, today: date) -> str:
+    """Build invoice number like 'EXP 02-2026' from item type and today's date."""
+    key = (item_type or "").replace(" ", "").strip().lower()
+    prefix = _INVOICE_PREFIX_MAP.get(key, "EXP")
+    return f"{prefix} {today.strftime('%m')}-{today.strftime('%Y')}"
+
+
 def _iter_import_rows(payload: dict):
     division = _coalesce(payload.get("division"), "0000")
     vendor = _coalesce(payload.get("vendor"), "CORE")
@@ -1112,12 +1325,14 @@ def _iter_import_rows(payload: dict):
         dept = _coalesce(item.get("departmentCode"))
         base_reference = _coalesce(item.get("reference"))
         gl_override = _coalesce(item.get("glAccountOverride"))
+        item_type = _coalesce(item.get("type"), "Receipt")
+        invoice = _invoice_number(item_type, today)
 
         lines = item.get("lines")
         if not isinstance(lines, list) or len(lines) == 0:
             lines = [
                 {
-                    "amount": item.get("amountTotal"),
+                    "amount": item.get("amountTotal") or item.get("amount"),
                     "activityCode": item.get("activityCode"),
                     "accountCode": item.get("accountCode"),
                 }
@@ -1153,8 +1368,10 @@ def _iter_import_rows(payload: dict):
             row["Organization Name"] = org_name
             row["First Name"] = first_name
             row["Last Name"] = last_name
+            row["Address Line 1"] = "."
             # Dates required by import (positions 19, 25, 26)
             row["Due Date"] = due_s
+            row["Invoice"] = invoice
             row["Invoice Date"] = today_s
             row["GL Post Date"] = today_s
             # Put the prior per-line reference into notes (Extended Reference, position 55).
@@ -1194,6 +1411,7 @@ def _graph_send_mail(
     cc_emails: Optional[list[str]] = None,
     subject: str,
     body_text: str,
+    body_html: Optional[str] = None,
     csv_text: str,
     csv_filename: str = "travel-expense.csv",
     additional_attachments: Optional[list[dict]] = None,
@@ -1238,10 +1456,17 @@ def _graph_send_mail(
     ]
     if additional_attachments:
         attachments.extend(additional_attachments)
+
+    body_content_type = "Text"
+    body_content = body_text
+    if isinstance(body_html, str) and body_html.strip() != "":
+        body_content_type = "HTML"
+        body_content = body_html
+
     payload = {
         "message": {
             "subject": subject,
-            "body": {"contentType": "Text", "content": body_text},
+            "body": {"contentType": body_content_type, "content": body_content},
             "toRecipients": [{"emailAddress": {"address": to_email}}],
             "attachments": attachments,
         },
@@ -1467,6 +1692,134 @@ def _sniff_file_type(data: bytes) -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _build_summary_table_pdf(payload: dict) -> Optional[bytes]:
+    """
+    Renders a summary table of expense items as a PDF page using PIL.
+    Returns PDF bytes, or None if no items are available.
+    """
+    items = payload.get("items")
+    if items is None and isinstance(payload.get("draftItemsJson"), str):
+        try:
+            items = json.loads(payload["draftItemsJson"])
+        except Exception:
+            items = None
+    if not isinstance(items, list) or len(items) == 0:
+        return None
+
+    try:
+        from PIL import ImageDraw, ImageFont
+    except ImportError:
+        logging.warning("PIL ImageDraw not available for summary table")
+        return None
+
+    try:
+        # Table data
+        headers = ["Type", "Date", "Description", "Account", "Dept", "Activity", "Amount"]
+        rows = []
+        total = 0.0
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            item_type = str(it.get("type") or "").strip()
+            date_val = str(it.get("travelDate") or it.get("receiptDate") or "").strip()
+            ref = str(it.get("reference") or "").strip()
+            dept = str(it.get("departmentCode") or "").strip()
+            activity = str(it.get("activityCode") or "").strip()
+            account = str(it.get("accountCode") or "").strip()
+            try:
+                amt = float(it.get("amount", 0))
+            except (ValueError, TypeError):
+                amt = 0.0
+            total += amt
+            rows.append([item_type, date_val, ref[:40], account, dept, activity, f"${amt:.2f}"])
+
+        if not rows:
+            return None
+
+        requester = str(payload.get("requesterEmail") or payload.get("toEmail") or "").strip()
+
+        # Rendering settings
+        dpi = 150
+        page_w = int(8.5 * dpi)
+        page_h = int(11 * dpi)
+        margin = int(0.5 * dpi)
+
+        # Use default font
+        try:
+            font = ImageFont.truetype("arial.ttf", 14)
+            font_bold = ImageFont.truetype("arialbd.ttf", 14)
+            font_header = ImageFont.truetype("arialbd.ttf", 18)
+        except Exception:
+            font = ImageFont.load_default()
+            font_bold = font
+            font_header = font
+
+        # Column widths (proportional to page width)
+        usable_w = page_w - 2 * margin
+        col_ratios = [0.08, 0.12, 0.28, 0.10, 0.10, 0.10, 0.12]
+        total_ratio = sum(col_ratios)
+        col_widths = [int(r / total_ratio * usable_w) for r in col_ratios]
+        # Adjust last column to fill remaining space
+        col_widths[-1] = usable_w - sum(col_widths[:-1])
+
+        row_height = 22
+        header_area = 60
+
+        img = Image.new("RGB", (page_w, page_h), "white")
+        draw = ImageDraw.Draw(img)
+
+        y = margin
+
+        # Title and metadata
+        draw.text((margin, y), "Travel Expense Summary", fill="black", font=font_header)
+        y += 28
+        if requester:
+            draw.text((margin, y), f"Requester: {requester}", fill="black", font=font)
+            y += 20
+        from datetime import date as _date_type
+        draw.text((margin, y), f"Date: {_date_type.today().isoformat()}", fill="black", font=font)
+        y += 20
+        draw.text((margin, y), f"Items: {len(rows)}    Total: ${total:.2f}", fill="black", font=font)
+        y += 30
+
+        # Draw table header
+        x = margin
+        for i, h in enumerate(headers):
+            draw.rectangle([x, y, x + col_widths[i], y + row_height], fill="#4472C4", outline="black")
+            draw.text((x + 4, y + 3), h, fill="white", font=font_bold)
+            x += col_widths[i]
+        y += row_height
+
+        # Draw rows
+        for row_idx, row in enumerate(rows):
+            bg = "#F2F2F2" if row_idx % 2 == 0 else "white"
+            x = margin
+            for i, cell in enumerate(row):
+                draw.rectangle([x, y, x + col_widths[i], y + row_height], fill=bg, outline="#CCCCCC")
+                # Truncate text to fit column
+                text = str(cell)
+                draw.text((x + 4, y + 3), text, fill="black", font=font)
+                x += col_widths[i]
+            y += row_height
+
+        # Draw total row
+        x = margin
+        total_label_w = sum(col_widths[:-1])
+        draw.rectangle([x, y, x + total_label_w, y + row_height], fill="#D9E2F3", outline="black")
+        draw.text((x + total_label_w - 60, y + 3), "Total:", fill="black", font=font_bold)
+        x += total_label_w
+        draw.rectangle([x, y, x + col_widths[-1], y + row_height], fill="#D9E2F3", outline="black")
+        draw.text((x + 4, y + 3), f"${total:.2f}", fill="black", font=font_bold)
+
+        # Convert to PDF
+        out = BytesIO()
+        img.save(out, format="PDF", resolution=dpi)
+        return out.getvalue()
+    except Exception as e:
+        logging.warning("Failed to build summary table PDF: %s", e)
+        return None
+
+
 def _merge_pdf_bytes(pdf_blobs: list[bytes]) -> bytes:
     writer = PdfWriter()
     for blob in pdf_blobs:
@@ -1481,6 +1834,7 @@ def _merge_pdf_bytes(pdf_blobs: list[bytes]) -> bytes:
 def _bytes_to_pdf(blob: bytes) -> tuple[bytes, Optional[str]]:
     """
     Returns (pdf_bytes, error). Supports PDFs and common image formats.
+    Resizes large images to keep PDF attachments under email size limits.
     """
     _ext, ctype = _sniff_file_type(blob)
     if ctype == "application/pdf":
@@ -1488,10 +1842,20 @@ def _bytes_to_pdf(blob: bytes) -> tuple[bytes, Optional[str]]:
     if ctype in {"image/png", "image/jpeg"}:
         try:
             img = Image.open(BytesIO(blob))
+
             if getattr(img, "mode", None) not in {"RGB"}:
                 img = img.convert("RGB")
+
+            # Resize large images to max 2000px on longest side (keeps receipts readable)
+            max_dim = 2000
+            if img.width > max_dim or img.height > max_dim:
+                ratio = min(max_dim / img.width, max_dim / img.height)
+                new_w = int(img.width * ratio)
+                new_h = int(img.height * ratio)
+                img = img.resize((new_w, new_h), Image.LANCZOS)
+
             out = BytesIO()
-            img.save(out, format="PDF")
+            img.save(out, format="PDF", resolution=150, quality=90)
             pdf_bytes = out.getvalue()
             if not pdf_bytes.startswith(b"%PDF-"):
                 return b"", "image-to-pdf conversion did not produce a PDF"
@@ -1608,6 +1972,10 @@ def _bundle_blobs_as_attachment(*, blobs: list[bytes], filenames: list[str], pay
 
     if bundle_format == "pdf":
         pdfs: list[bytes] = []
+        # Prepend summary table page
+        summary_pdf = _build_summary_table_pdf(payload)
+        if summary_pdf:
+            pdfs.append(summary_pdf)
         for i, b in enumerate(blobs):
             pdf_b, err = _bytes_to_pdf(b)
             if err:
@@ -1795,6 +2163,286 @@ def receipt_upload_page(req: func.HttpRequest) -> func.HttpResponse:
   </body>
 </html>"""
     return func.HttpResponse(html, mimetype="text/html")
+
+
+def _get_document_intelligence_client():
+    """
+    Returns an Azure Document Intelligence client using Managed Identity.
+    Requires DOCUMENT_INTELLIGENCE_ENDPOINT env var.
+    """
+    endpoint = os.getenv("DOCUMENT_INTELLIGENCE_ENDPOINT", "").strip()
+    if not endpoint:
+        raise RuntimeError("DOCUMENT_INTELLIGENCE_ENDPOINT environment variable not set")
+    credential = DefaultAzureCredential()
+    return DocumentIntelligenceClient(endpoint=endpoint, credential=credential)
+
+
+@app.route(route="receipt-analyze", methods=["POST"], auth_level=func.AuthLevel.FUNCTION)
+def receipt_analyze(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Analyzes a receipt image using Azure Document Intelligence.
+
+    Accepts either:
+    - JSON body with base64 encoded image: {"imageBase64": "..."}
+    - JSON body with blob reference: {"uploadId": "...", "filename": "..."}
+
+    Returns extracted receipt data:
+    - merchant: Merchant/vendor name
+    - date: Transaction date
+    - total: Total amount
+    - subtotal: Subtotal if available
+    - tax: Tax amount if available
+    - items: Array of line items with description and amount
+    - category: Suggested category based on merchant
+    """
+    try:
+        body = req.get_json() if req.get_body() else {}
+    except Exception:
+        body = {}
+
+    image_bytes = None
+
+    # Option 1: Base64 encoded image in request
+    image_base64 = body.get("imageBase64", "").strip()
+    if image_base64:
+        try:
+            # Remove data URL prefix if present
+            if "," in image_base64:
+                image_base64 = image_base64.split(",", 1)[1]
+            image_bytes = base64.b64decode(image_base64)
+        except Exception as e:
+            return func.HttpResponse(
+                json.dumps({"ok": False, "error": f"Invalid base64 image: {e}"}),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+    # Option 2: Fetch from blob storage
+    upload_id = body.get("uploadId", "").strip()
+    filename = body.get("filename", "").strip()
+    if not image_bytes and upload_id:
+        try:
+            bsc = _blob_service_client()
+            container = bsc.get_container_client(_receipt_container_name())
+
+            # If filename provided, fetch that specific file
+            if filename:
+                blob_name = _upload_prefix(upload_id) + filename
+                blob_client = container.get_blob_client(blob_name)
+                image_bytes = blob_client.download_blob().readall()
+            else:
+                # Fetch the first file in the upload
+                prefix = _upload_prefix(upload_id)
+                blobs = list(container.list_blobs(name_starts_with=prefix))
+                if blobs:
+                    blob_client = container.get_blob_client(blobs[0].name)
+                    image_bytes = blob_client.download_blob().readall()
+        except Exception as e:
+            return func.HttpResponse(
+                json.dumps({"ok": False, "error": f"Failed to fetch from blob storage: {e}"}),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+    # Option 3: Fetch from URL (for chat attachments)
+    image_url = body.get("imageUrl", "").strip()
+    if not image_bytes and image_url:
+        try:
+            logging.info("receipt-analyze fetching from URL: %s", image_url[:100])
+            resp = requests.get(image_url, timeout=30)
+            if resp.status_code == 200:
+                image_bytes = resp.content
+            else:
+                return func.HttpResponse(
+                    json.dumps({"ok": False, "error": f"Failed to fetch image from URL: HTTP {resp.status_code}"}),
+                    status_code=400,
+                    mimetype="application/json"
+                )
+        except Exception as e:
+            return func.HttpResponse(
+                json.dumps({"ok": False, "error": f"Failed to fetch image from URL: {e}"}),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+    if not image_bytes:
+        return func.HttpResponse(
+            json.dumps({"ok": False, "error": "No image provided. Send imageBase64, uploadId, or imageUrl."}),
+            status_code=400,
+            mimetype="application/json"
+        )
+
+    # Resize large images to fit Document Intelligence limit (4 MB)
+    MAX_IMAGE_BYTES = 4 * 1024 * 1024
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        try:
+            img = Image.open(BytesIO(image_bytes))
+            orig_fmt = (img.format or "").upper()
+            orig_size = len(image_bytes)
+            # Convert to RGB (drop alpha) so JPEG save always works
+            if img.mode in ("RGBA", "LA", "P"):
+                img = img.convert("RGB")
+            # Progressively scale down until under limit
+            scale = 0.85
+            for _ in range(20):
+                new_w = int(img.width * scale)
+                new_h = int(img.height * scale)
+                if new_w < 100 or new_h < 100:
+                    break
+                resized = img.resize((new_w, new_h), Image.LANCZOS)
+                buf = BytesIO()
+                resized.save(buf, format="JPEG", quality=85)
+                if buf.tell() <= MAX_IMAGE_BYTES:
+                    image_bytes = buf.getvalue()
+                    logging.info("receipt-analyze resized image from %d to %d bytes (%dx%d)",
+                                 orig_size, len(image_bytes), new_w, new_h)
+                    break
+                scale *= 0.75
+                img = resized
+            else:
+                logging.warning("receipt-analyze could not resize image under 4MB")
+        except Exception as e:
+            logging.warning("receipt-analyze image resize failed: %s", e)
+
+    # Helper to extract value from DocumentField (SDK v1.0+ removed .value)
+    def _field_val(field):
+        """Extract the value from a DocumentField, handling SDK version differences."""
+        if field is None:
+            return None
+        # Newer SDK: type-specific properties
+        for attr in ("value_string", "value_number", "value_integer", "value_date",
+                      "value_currency", "value_array", "value_object", "content", "value"):
+            v = getattr(field, attr, None)
+            if v is not None:
+                # value_currency is an object with .amount
+                if attr == "value_currency" and hasattr(v, "amount"):
+                    return v.amount
+                return v
+        return None
+
+    # Analyze with Document Intelligence
+    try:
+        client = _get_document_intelligence_client()
+
+        # Use prebuilt-receipt model
+        poller = client.begin_analyze_document(
+            "prebuilt-receipt",
+            AnalyzeDocumentRequest(bytes_source=image_bytes),
+        )
+        result = poller.result()
+
+        # Extract receipt data
+        receipt_data = {
+            "ok": True,
+            "merchant": "",
+            "date": "",
+            "total": 0.0,
+            "subtotal": 0.0,
+            "tax": 0.0,
+            "items": [],
+            "category": "other",
+            "rawText": "",
+        }
+
+        if result.documents:
+            doc = result.documents[0]
+            fields = doc.fields or {}
+
+            # Merchant name
+            if "MerchantName" in fields:
+                val = _field_val(fields["MerchantName"])
+                if val:
+                    receipt_data["merchant"] = str(val)
+
+            # Transaction date
+            if "TransactionDate" in fields:
+                val = _field_val(fields["TransactionDate"])
+                if val:
+                    if hasattr(val, "strftime"):
+                        receipt_data["date"] = val.strftime("%m/%d/%Y")
+                    else:
+                        receipt_data["date"] = str(val)
+
+            # Total
+            if "Total" in fields:
+                val = _field_val(fields["Total"])
+                if val is not None:
+                    receipt_data["total"] = float(val)
+
+            # Subtotal
+            if "Subtotal" in fields:
+                val = _field_val(fields["Subtotal"])
+                if val is not None:
+                    receipt_data["subtotal"] = float(val)
+
+            # Tax
+            if "TotalTax" in fields:
+                val = _field_val(fields["TotalTax"])
+                if val is not None:
+                    receipt_data["tax"] = float(val)
+
+            # Line items
+            if "Items" in fields:
+                items_val = _field_val(fields["Items"])
+                if items_val:
+                    for item in items_val:
+                        item_fields = _field_val(item) if not isinstance(item, dict) else item
+                        if not item_fields:
+                            item_fields = getattr(item, "value_object", None) or {}
+                        line_item = {
+                            "description": "",
+                            "amount": 0.0,
+                            "quantity": 0.0,
+                        }
+                        if "Description" in item_fields:
+                            desc = _field_val(item_fields["Description"]) if not isinstance(item_fields["Description"], str) else item_fields["Description"]
+                            if desc:
+                                line_item["description"] = str(desc)
+                        if "TotalPrice" in item_fields:
+                            price = _field_val(item_fields["TotalPrice"]) if not isinstance(item_fields["TotalPrice"], (int, float)) else item_fields["TotalPrice"]
+                            if price is not None:
+                                line_item["amount"] = float(price)
+                        if "Quantity" in item_fields:
+                            qty = _field_val(item_fields["Quantity"]) if not isinstance(item_fields["Quantity"], (int, float)) else item_fields["Quantity"]
+                            if qty is not None:
+                                line_item["quantity"] = float(qty)
+                        receipt_data["items"].append(line_item)
+
+            # Suggest category based on merchant name
+            merchant_lower = receipt_data["merchant"].lower()
+            if any(kw in merchant_lower for kw in ["hotel", "marriott", "hilton", "hyatt", "inn", "suites", "lodge"]):
+                receipt_data["category"] = "hotel"
+            elif any(kw in merchant_lower for kw in ["airline", "delta", "united", "american", "southwest", "flight"]):
+                receipt_data["category"] = "airfare"
+            elif any(kw in merchant_lower for kw in ["uber", "lyft", "taxi", "cab"]):
+                receipt_data["category"] = "transportation"
+            elif any(kw in merchant_lower for kw in ["parking", "garage"]):
+                receipt_data["category"] = "parking"
+            elif any(kw in merchant_lower for kw in ["restaurant", "cafe", "coffee", "starbucks", "mcdonald", "wendy", "subway", "chipotle", "diner", "grill", "kitchen", "bistro"]):
+                receipt_data["category"] = "meal"
+            elif any(kw in merchant_lower for kw in ["gas", "fuel", "shell", "chevron", "exxon", "bp", "conoco", "phillips"]):
+                receipt_data["category"] = "fuel"
+
+        # Include raw text for debugging/fallback
+        if result.content:
+            receipt_data["rawText"] = result.content[:1000]  # Limit to first 1000 chars
+
+        # Echo back uploadId so it can be used for receipt bundling on submit
+        if upload_id:
+            receipt_data["uploadId"] = upload_id
+
+        return func.HttpResponse(
+            json.dumps(receipt_data),
+            mimetype="application/json"
+        )
+
+    except Exception as e:
+        logging.exception("Receipt analysis failed")
+        return func.HttpResponse(
+            json.dumps({"ok": False, "error": f"Analysis failed: {e}"}),
+            status_code=500,
+            mimetype="application/json"
+        )
 
 
 def _foundry_get_json(project_endpoint: str, path: str) -> dict:
@@ -2009,6 +2657,10 @@ def _build_receipts_zip_from_foundry(payload: dict) -> tuple[list[dict], int, bo
 
         if bundle_format == "pdf":
             pdfs: list[bytes] = []
+            # Prepend summary table page
+            summary_pdf = _build_summary_table_pdf(payload)
+            if summary_pdf:
+                pdfs.append(summary_pdf)
             for i, b in enumerate(downloaded):
                 pdf_b, err = _bytes_to_pdf(b)
                 if err:
@@ -2196,6 +2848,10 @@ def _build_receipts_zip_from_foundry(payload: dict) -> tuple[list[dict], int, bo
 
     if bundle_format == "pdf":
         pdfs: list[bytes] = []
+        # Prepend summary table page
+        summary_pdf = _build_summary_table_pdf(payload)
+        if summary_pdf:
+            pdfs.append(summary_pdf)
         for i, b in enumerate(downloaded):
             pdf_b, err = _bytes_to_pdf(b)
             if err:
@@ -2303,6 +2959,10 @@ def _build_receipt_attachments(payload: dict) -> tuple[list[dict], int, bool, Op
 
     if bundle_format == "pdf":
         pdfs: list[bytes] = []
+        # Prepend summary table page
+        summary_pdf = _build_summary_table_pdf(payload)
+        if summary_pdf:
+            pdfs.append(summary_pdf)
         for i, (name, _content_type, data) in enumerate(decoded):
             pdf_b, err = _bytes_to_pdf(data)
             if err:
@@ -2399,8 +3059,10 @@ def submit_report(req: func.HttpRequest) -> func.HttpResponse:
             "toEmail",
             "fromUser",
             "requesterEmail",
+            "ccEmails",
             "subject",
             "bodyText",
+            "bodyHtml",
             "receiptBundleFormat",
             "sharepointFileUrls",
             "receiptUploadId",
@@ -2503,10 +3165,33 @@ def submit_report(req: func.HttpRequest) -> func.HttpResponse:
     if cc_requester and requester_email and requester_email != to_email.lower():
         cc_emails.append(requester_email)
 
+    # Optional: allow callers (topics/tools) to CC additional recipients.
+    # Accept comma/semicolon-separated string or a list of strings.
+    cc_extra = payload.get("ccEmails") or payload.get("ccEmail") or payload.get("cc")
+    extra_list: list[str] = []
+    if isinstance(cc_extra, str):
+        for part in re.split(r"[;,]", cc_extra):
+            p = (part or "").strip().lower()
+            if p:
+                extra_list.append(p)
+    elif isinstance(cc_extra, list):
+        for v in cc_extra:
+            if isinstance(v, str):
+                p = v.strip().lower()
+                if p:
+                    extra_list.append(p)
+
+    for e in extra_list:
+        if not e or e == to_email.lower():
+            continue
+        if e not in cc_emails:
+            cc_emails.append(e)
+
     subject = (payload.get("subject") or "").strip() or "Travel expense submission"
     body_text = (payload.get("bodyText") or "").strip() or (
         f"Travel expense submission generated by the bot.\nLines: {line_count}\nTotal: {amount_total:.2f}"
     )
+    body_html = payload.get("bodyHtml")
 
     mail_error = None
     attachments = []
@@ -2514,7 +3199,7 @@ def submit_report(req: func.HttpRequest) -> func.HttpResponse:
     attachment_bytes = 0
     fetch_from_thread = bool(_payload_bool("fetchReceiptsFromThread", False))
 
-    # Determine if the payload includes any receipt items.
+    # Determine if the payload includes any receipt items and collect uploadIds from items.
     items = payload.get("items")
     if items is None and isinstance(payload.get("draftItemsJson"), str):
         try:
@@ -2522,11 +3207,26 @@ def submit_report(req: func.HttpRequest) -> func.HttpResponse:
         except Exception:
             items = None
     has_receipts = False
+    item_upload_ids: list[str] = []
     if isinstance(items, list):
         for it in items:
-            if isinstance(it, dict) and str(it.get("mode") or "").strip().lower() == "receipt":
-                has_receipts = True
-                break
+            if isinstance(it, dict):
+                item_type = str(it.get("type") or it.get("mode") or "").strip().lower()
+                if item_type in ("receipt", "boots"):
+                    has_receipts = True
+                    # Collect receiptUploadId from individual items
+                    item_upload_id = (it.get("receiptUploadId") or it.get("uploadId") or "").strip()
+                    if item_upload_id and item_upload_id not in item_upload_ids:
+                        item_upload_ids.append(item_upload_id)
+                    # Boots flow can include a required authorization form attachment.
+                    auth_upload_id = (
+                        it.get("bootAuthorizationUploadId")
+                        or it.get("bootsAuthorizationUploadId")
+                        or it.get("authorizationUploadId")
+                        or ""
+                    ).strip()
+                    if auth_upload_id and auth_upload_id not in item_upload_ids:
+                        item_upload_ids.append(auth_upload_id)
 
     if payload.get("attachments") is not None:
         attachments, attachment_bytes, attachments_zipped, att_error = _build_receipt_attachments(payload)
@@ -2561,17 +3261,38 @@ def submit_report(req: func.HttpRequest) -> func.HttpResponse:
                 attachments_zipped = sp_bundled
 
     # Fallback: If receipts were uploaded via the receipt-upload page, fetch them from Blob Storage and bundle them.
+    # Check both top-level receiptUploadId and item-level uploadIds collected above.
     receipt_upload_id = _coalesce(payload.get("receiptUploadId"), payload.get("ReceiptUploadId"), payload.get("uploadId"), payload.get("UploadId"))
-    if (has_receipts or fetch_from_thread) and not mail_error and len(attachments) == 0 and receipt_upload_id:
-        logging.info("submit-report receipt-bundle: source=blob uploadId=%s", receipt_upload_id)
-        blob_bytes, blob_names, blob_err = _download_receipts_from_blob(receipt_upload_id)
+    all_upload_ids = item_upload_ids.copy()
+    if receipt_upload_id and receipt_upload_id not in all_upload_ids:
+        all_upload_ids.insert(0, receipt_upload_id)
+
+    if (has_receipts or fetch_from_thread) and not mail_error and len(attachments) == 0 and len(all_upload_ids) > 0:
+        logging.info("submit-report receipt-bundle: source=blob uploadIds=%s", all_upload_ids)
+        all_blob_bytes: list[bytes] = []
+        all_blob_names: list[str] = []
+        blob_err = None
+        for uid in all_upload_ids:
+            uid_bytes, uid_names, uid_err = _download_receipts_from_blob(uid)
+            if uid_err:
+                logging.warning("submit-report receipt-bundle (blob) uploadId=%s failed: %s", uid, uid_err)
+                # Continue to try other uploadIds, but track the error
+                if blob_err is None:
+                    blob_err = uid_err
+            else:
+                all_blob_bytes.extend(uid_bytes)
+                all_blob_names.extend(uid_names)
+
+        if len(all_blob_bytes) > 0:
+            blob_err = None  # Clear error if we got some receipts
+
         if blob_err:
             logging.warning("submit-report receipt-bundle (blob) failed: %s", blob_err)
             mail_error = blob_err
-        else:
+        elif len(all_blob_bytes) > 0:
             blob_atts, blob_count, blob_bundled, bundle_err = _bundle_blobs_as_attachment(
-                blobs=blob_bytes,
-                filenames=blob_names,
+                blobs=all_blob_bytes,
+                filenames=all_blob_names,
                 payload=payload,
             )
             if bundle_err:
@@ -2630,8 +3351,9 @@ def submit_report(req: func.HttpRequest) -> func.HttpResponse:
     elif requested_send_email and missing_gl_count > 0:
         mail_error = f"Missing GL Account on {missing_gl_count} line(s)."
     elif send_email:
-        # Graph sendMail simple attachments are limited; keep a conservative cap.
-        max_raw = int(os.getenv("GRAPH_MAX_ATTACHMENT_BYTES") or "2500000")
+        # Graph sendMail simple attachments are limited to ~3 MB raw (4 MB base64).
+        # Images are resized in _bytes_to_pdf so combined PDF is typically well under this.
+        max_raw = int(os.getenv("GRAPH_MAX_ATTACHMENT_BYTES") or "7000000")
         if attachment_bytes > max_raw:
             mail_error = f"Attachments too large ({attachment_bytes} bytes). Reduce size or set GRAPH_MAX_ATTACHMENT_BYTES higher."
 
@@ -2648,6 +3370,7 @@ def submit_report(req: func.HttpRequest) -> func.HttpResponse:
                 cc_emails=cc_emails,
                 subject=subject,
                 body_text=body_text,
+                body_html=body_html,
                 csv_text=csv_text,
                 additional_attachments=attachments,
             )
